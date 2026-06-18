@@ -69,11 +69,18 @@
   .video-item:hover{background:var(--surface);border-color:var(--border)}
   .video-item.selected{background:rgba(79,126,255,.1);border-color:var(--accent)}
   .video-item.duplicate{opacity:.5;cursor:not-allowed}
+  .video-item.unavailable{opacity:.65;cursor:not-allowed}
   .video-item input[type=checkbox]{flex-shrink:0;accent-color:var(--accent)}
   .video-title{flex:1;font-size:.82rem;line-height:1.3}
+  .title-input{background:transparent;border:none;border-bottom:1px dashed var(--border);color:var(--text);font-size:.82rem;font-family:inherit;padding:1px 4px;width:100%;outline:none;transition:border-color .15s}
+  .title-input:focus{border-bottom-color:var(--accent);background:var(--surface2);border-radius:4px 4px 0 0}
+  .title-converted{color:var(--success)}
   .video-dur{font-size:.73rem;color:var(--muted);font-family:var(--mono);white-space:nowrap}
   .video-cat{font-size:.68rem;padding:2px 6px;border-radius:4px;background:var(--border);color:var(--muted);white-space:nowrap}
+  .lang-tw{font-size:.68rem;padding:2px 6px;border-radius:4px;background:rgba(79,126,255,.15);color:var(--accent);white-space:nowrap}
+  .lang-cn{font-size:.68rem;padding:2px 6px;border-radius:4px;background:rgba(124,92,252,.15);color:var(--accent2);white-space:nowrap}
   .dup-badge{font-size:.68rem;padding:2px 6px;border-radius:4px;background:rgba(243,156,18,.2);color:var(--warn);white-space:nowrap}
+  .unavailable-badge{font-size:.68rem;padding:2px 6px;border-radius:4px;background:rgba(231,76,60,.18);color:var(--danger);white-space:nowrap}
 
   .select-bar{display:flex;gap:6px;align-items:center;margin-bottom:8px;flex-wrap:wrap}
   .count-badge{font-size:.75rem;color:var(--muted);margin-left:auto}
@@ -163,7 +170,7 @@
       <hr class="divider">
       <div class="card-title">輸出資料夾</div>
       <input type="text" id="single-outdir" placeholder="留空 = 自動建立（以影片標題命名）"/>
-      <div class="dir-hint">留空時將在專案根目錄自動建立以影片標題命名的資料夾</div>
+      <div class="dir-hint">留空時將在系統下載資料夾內以影片標題自動命名子資料夾</div>
       <div class="action-bar">
         <button class="btn btn-primary" onclick="startSingleDownload()">⬇ 開始下載</button>
         <button class="btn btn-ghost" onclick="resetTab('single')">↺ 重置</button>
@@ -189,6 +196,13 @@
         <input type="number" id="multi-min" placeholder="最短" min="0" step="0.1" oninput="filterMultiList()">
         <span class="text-muted">~</span>
         <input type="number" id="multi-max" placeholder="最長" min="0" step="0.1" oninput="filterMultiList()">
+        <label style="margin-left:6px">語言</label>
+        <select id="multi-lang-filter" onchange="filterMultiList()" style="max-width:130px">
+          <option value="">全部語言</option>
+          <option value="zh-TW">繁體中文</option>
+          <option value="zh-CN">簡體中文</option>
+          <option value="other">其他/未知</option>
+        </select>
         <button class="btn btn-ghost btn-sm" onclick="clearMultiFilter()">清除篩選</button>
       </div>
       <div class="select-bar">
@@ -211,7 +225,7 @@
       <hr class="divider">
       <div class="card-title">輸出資料夾</div>
       <input type="text" id="multi-outdir" placeholder="留空 = 自動建立"/>
-      <div class="dir-hint">留空時將以第一首影片標題自動命名資料夾</div>
+      <div class="dir-hint">留空時將在系統下載資料夾內以第一首影片標題自動命名子資料夾</div>
       <div class="action-bar">
         <button class="btn btn-primary" onclick="startMultiDownload()">⬇ 下載已選項目</button>
       </div>
@@ -240,6 +254,13 @@
         <select id="pl-cat-filter" onchange="filterPlaylist()" style="max-width:160px">
           <option value="">全部類型</option>
         </select>
+        <label style="margin-left:6px">語言</label>
+        <select id="pl-lang-filter" onchange="filterPlaylist()" style="max-width:130px">
+          <option value="">全部語言</option>
+          <option value="zh-TW">繁體中文</option>
+          <option value="zh-CN">簡體中文</option>
+          <option value="other">其他/未知</option>
+        </select>
         <button class="btn btn-ghost btn-sm" onclick="clearPlFilter()">清除</button>
       </div>
       <div class="select-bar">
@@ -262,7 +283,7 @@
       <hr class="divider">
       <div class="card-title">輸出資料夾</div>
       <input type="text" id="pl-outdir" placeholder="留空 = 以播放清單名稱命名"/>
-      <div class="dir-hint">留空時將以播放清單標題自動命名資料夾</div>
+      <div class="dir-hint">留空時將在系統下載資料夾內以播放清單標題自動命名子資料夾</div>
       <div class="action-bar">
         <button class="btn btn-primary" onclick="startPlaylistDownload()">⬇ 下載已選項目</button>
         <button class="btn btn-ghost" onclick="resetTab('playlist')">↺ 重置</button>
@@ -290,6 +311,13 @@
         <input type="number" id="imp-min" placeholder="最短" min="0" step="0.1" oninput="filterImportList()">
         <span class="text-muted">~</span>
         <input type="number" id="imp-max" placeholder="最長" min="0" step="0.1" oninput="filterImportList()">
+        <label style="margin-left:6px">語言</label>
+        <select id="imp-lang-filter" onchange="filterImportList()" style="max-width:130px">
+          <option value="">全部語言</option>
+          <option value="zh-TW">繁體中文</option>
+          <option value="zh-CN">簡體中文</option>
+          <option value="other">其他/未知</option>
+        </select>
         <button class="btn btn-ghost btn-sm" onclick="fetchImportInfo()"><span id="imp-fetch-icon">🔍</span> 查詢影片資訊</button>
         <button class="btn btn-ghost btn-sm" onclick="clearImportFilter()">清除篩選</button>
       </div>
@@ -313,7 +341,7 @@
       <hr class="divider">
       <div class="card-title">輸出資料夾</div>
       <input type="text" id="imp-outdir" placeholder="留空 = 自動建立"/>
-      <div class="dir-hint">留空時將以第一首影片標題自動命名資料夾</div>
+      <div class="dir-hint">留空時將在系統下載資料夾內以第一首影片標題自動命名子資料夾</div>
       <div class="action-bar">
         <button class="btn btn-primary" onclick="startImportDownload()">⬇ 下載已選項目</button>
         <button class="btn btn-ghost" onclick="resetTab('import')">↺ 重置</button>
@@ -412,15 +440,30 @@ function setLoading(iconId, loading) {
 }
 
 // ── Duplicate detection ──
+function isItemUnavailable(item) {
+  return Boolean(item?._duplicate || item?.is_private || item?.downloadable === false);
+}
+
+function unavailableReason(item) {
+  if (item?.is_private) return item.unavailable_reason || '私人影片無法下載';
+  if (item?._duplicate) return '重複';
+  return item?.unavailable_reason || '無法下載';
+}
+
 function markDuplicates(items) {
   const seen = new Map();
   items.forEach((item, idx) => {
-    const key = item.title.trim().toLowerCase();
-    if (seen.has(key)) {
+    if (item.is_private || item.downloadable === false) {
+      item._duplicate = false;
+      item._checked = false;
+      return;
+    }
+    const key = (item.title || '').trim().toLowerCase();
+    if (key && seen.has(key)) {
       item._duplicate = true;
       item._checked = false;
     } else {
-      seen.set(key, idx);
+      if (key) seen.set(key, idx);
       item._duplicate = false;
     }
   });
@@ -439,26 +482,73 @@ function durInRange(item, minEl, maxEl) {
   return minOk && maxOk;
 }
 
-// ── Item HTML ──
+// ── Simplified → Traditional conversion (basic char map via opencc on backend) ──
+async function convertTitles(items) {
+  // Send all titles to backend for s2t conversion
+  const titles = items.map(i => i.title);
+  try {
+    const res = await apiFetch('/api/convert-titles', { titles });
+    if (res.converted) {
+      res.converted.forEach((t, i) => {
+        items[i].display_title = t;
+        items[i].custom_title = '';  // empty = use display_title
+      });
+    }
+  } catch(e) {}
+  return items;
+}
+
+// ── Item HTML with editable title ──
 function itemHTML(item, prefix, idx) {
   const isDup = item._duplicate;
-  const checked = (!isDup && item._checked) ? 'checked' : '';
-  const disabled = isDup ? 'disabled' : '';
-  const selectedCls = (!isDup && item._checked) ? 'selected' : '';
+  const isUnavailable = isItemUnavailable(item);
+  const checked = (!isUnavailable && item._checked) ? 'checked' : '';
+  const disabled = isUnavailable ? 'disabled' : '';
+  const selectedCls = (!isUnavailable && item._checked) ? 'selected' : '';
   const dupCls = isDup ? 'duplicate' : '';
-  const toggle = isDup ? '' : `toggle${prefix.charAt(0).toUpperCase()+prefix.slice(1)}Check(${idx})`;
-  const onclick = isDup ? '' : `onclick="${toggle}"`;
+  const unavailableCls = isUnavailable ? 'unavailable' : '';
+  const toggle = isUnavailable ? '' : `toggle${prefix.charAt(0).toUpperCase()+prefix.slice(1)}Check(${idx})`;
+  const onclick = isUnavailable ? '' : `onclick="${toggle}"`;
   const catBadge = item.category ? `<span class="video-cat">${esc(item.category)}</span>` : '';
   const dupBadge = isDup ? `<span class="dup-badge">重複</span>` : '';
-  return `<div class="video-item ${selectedCls} ${dupCls}" ${onclick}>
+  const unavailableBadge = (isUnavailable && !isDup) ? `<span class="unavailable-badge">${esc(unavailableReason(item))}</span>` : '';
+  const wasConverted = item.display_title && item.display_title !== item.title;
+  const displayVal = item.custom_title || item.display_title || item.title || unavailableReason(item);
+  const convertedCls = wasConverted ? 'title-converted' : '';
+  let langBadge = '';
+  if (item.lang === 'zh-TW') langBadge = `<span class="lang-tw">繁中</span>`;
+  else if (item.lang === 'zh-CN') langBadge = `<span class="lang-cn">簡中</span>`;
+
+  return `<div class="video-item ${selectedCls} ${dupCls} ${unavailableCls}" ${onclick}>
     <input type="checkbox" ${checked} ${disabled} onclick="event.stopPropagation();${toggle}">
-    <div class="video-title">${esc(item.title)}</div>
-    ${catBadge}${dupBadge}
+    <div class="video-title">
+      <input class="title-input ${convertedCls}" value="${esc(displayVal)}"
+        onclick="event.stopPropagation()"
+        onchange="updateCustomTitle('${prefix}',${idx},this.value)"
+        oninput="updateCustomTitle('${prefix}',${idx},this.value)"
+        title="${wasConverted ? '原標題: '+esc(item.title) : ''}"
+        ${isUnavailable?'disabled':''}>
+    </div>
+    ${langBadge}${catBadge}${dupBadge}${unavailableBadge}
     <div class="video-dur">${item.duration_str || formatDur(item.duration)}</div>
   </div>`;
 }
 
-// ── SINGLE ──
+function updateCustomTitle(prefix, idx, val) {
+  const trimmed = val.trim();
+  const stateKey = prefix === 'pl' ? 'pl' : prefix === 'imp' ? 'imp' : prefix;
+  const items = stateKey === 'pl' ? state.pl.items : stateKey === 'imp' ? state.imp.items : state.multi.items;
+  if (items[idx]) items[idx].custom_title = trimmed;
+}
+
+// ── Language filter helper ──
+function langMatch(item, filterId) {
+  const val = document.getElementById(filterId).value;
+  if (!val) return true;
+  return (item.lang || 'other') === val;
+}
+
+
 async function fetchSingleInfo() {
   const url = document.getElementById('single-url').value.trim();
   if (!url) return;
@@ -468,10 +558,27 @@ async function fetchSingleInfo() {
   const div = document.getElementById('single-info');
   if (info.error) {
     div.innerHTML = `<div style="color:var(--danger);font-size:.8rem">⚠ ${esc(info.error)}</div>`;
+    document.getElementById('single-format-card').classList.add('hidden');
     div.classList.remove('hidden'); return;
   }
   state.single.info = info;
-  div.innerHTML = `<div class="info-panel"><strong style="font-size:.9rem">${esc(info.title)}</strong>
+  if (isItemUnavailable(info)) {
+    const displayTitle = info.display_title || info.title || unavailableReason(info);
+    div.innerHTML = `<div class="info-panel"><strong style="font-size:.9rem">${esc(displayTitle)}</strong>
+      <div class="info-meta">
+        <span class="unavailable-badge">${esc(unavailableReason(info))}</span>
+      </div></div>`;
+    div.classList.remove('hidden');
+    document.getElementById('single-format-card').classList.add('hidden');
+    return;
+  }
+  // Convert title s2t
+  const conv = await apiFetch('/api/convert-titles', {titles: [info.title]});
+  if (conv.converted) info.display_title = conv.converted[0];
+  const displayTitle = info.display_title || info.title;
+  const wasConverted = info.display_title && info.display_title !== info.title;
+  div.innerHTML = `<div class="info-panel"><strong style="font-size:.9rem;${wasConverted?'color:var(--success)':''}">${esc(displayTitle)}</strong>
+    ${wasConverted?`<div style="font-size:.72rem;color:var(--muted);margin-top:3px">原標題: ${esc(info.title)}</div>`:''}
     <div class="info-meta">
       <span class="info-badge">⏱ ${info.duration_str}</span>
       ${info.uploader?`<span class="info-badge">👤 ${esc(info.uploader)}</span>`:''}
@@ -486,8 +593,12 @@ async function startSingleDownload() {
   const type = document.getElementById('single-type').value;
   const ext  = document.getElementById('single-ext').value;
   const dir  = document.getElementById('single-outdir').value.trim();
-  const hint = state.single.info?.title || 'download';
-  const res  = await apiFetch('/api/start-download', {urls:[url], media_type:type, extension:ext, output_dir:dir, title_hint:hint});
+  const info = state.single.info;
+  if (isItemUnavailable(info)) return alert(unavailableReason(info));
+  const hint = info?.display_title || info?.title || 'download';
+  const items = [{url, custom_title: hint}];
+  const res  = await apiFetch('/api/start-download', {items, media_type:type, extension:ext, output_dir:dir, title_hint:hint});
+  if (res.error) return alert(res.error);
   if (res.job_id) { state.single.jobId = res.job_id; pollProgress(res.job_id, 'single-progress'); }
 }
 
@@ -512,7 +623,8 @@ async function fetchMultiInfo() {
       else items.push({...info, url, _checked:true});
     }
   }
-  state.multi.items = markDuplicates(items);
+  const converted = await convertTitles(items);
+  state.multi.items = markDuplicates(converted);
   setLoading('multi-fetch-icon', false);
   renderMultiList();
   document.getElementById('multi-list-card').classList.remove('hidden');
@@ -520,24 +632,30 @@ async function fetchMultiInfo() {
 }
 
 function renderMultiList() {
-  const visible = state.multi.items.filter(i => durInRange(i,'multi-min','multi-max'));
-  document.getElementById('multi-list').innerHTML = visible.map((item,idx)=>itemHTML(item,'multi',idx)).join('');
+  const visible = state.multi.items
+    .map((item, idx) => ({ item, idx }))
+    .filter(({ item }) => durInRange(item,'multi-min','multi-max') && langMatch(item,'multi-lang-filter'));
+  document.getElementById('multi-list').innerHTML = visible.map(({item,idx})=>itemHTML(item,'multi',idx)).join('');
   updateMultiCount();
 }
 function filterMultiList() { renderMultiList(); }
-function clearMultiFilter() { document.getElementById('multi-min').value=''; document.getElementById('multi-max').value=''; renderMultiList(); }
-function toggleMultiCheck(idx) { if(!state.multi.items[idx]._duplicate){state.multi.items[idx]._checked=!state.multi.items[idx]._checked;} renderMultiList(); }
-function selectAllMulti(v) { state.multi.items.forEach(i=>{ if(!i._duplicate) i._checked=v; }); renderMultiList(); }
+function clearMultiFilter() { document.getElementById('multi-min').value=''; document.getElementById('multi-max').value=''; document.getElementById('multi-lang-filter').value=''; renderMultiList(); }
+function toggleMultiCheck(idx) { if(!isItemUnavailable(state.multi.items[idx])){state.multi.items[idx]._checked=!state.multi.items[idx]._checked;} renderMultiList(); }
+function selectAllMulti(v) { state.multi.items.forEach(i=>{ if(!isItemUnavailable(i)) i._checked=v; }); renderMultiList(); }
 function updateMultiCount() {
-  const checked=state.multi.items.filter(i=>i._checked&&!i._duplicate).length;
-  document.getElementById('multi-count').textContent=`${checked} / ${state.multi.items.length} 已選`;
+  const selectable=state.multi.items.filter(i=>!isItemUnavailable(i)).length;
+  const checked=state.multi.items.filter(i=>i._checked&&!isItemUnavailable(i)).length;
+  const unavailable=state.multi.items.length-selectable;
+  document.getElementById('multi-count').textContent=`${checked} / ${selectable} 已選${unavailable ? `（${unavailable} 個不可選）` : ''}`;
 }
 async function startMultiDownload() {
-  const selected=state.multi.items.filter(i=>i._checked&&!i._duplicate);
+  const selected=state.multi.items.filter(i=>i._checked&&!isItemUnavailable(i));
   if(!selected.length) return alert('請至少選擇一個影片');
   const type=document.getElementById('multi-type').value, ext=document.getElementById('multi-ext').value;
-  const dir=document.getElementById('multi-outdir').value.trim(), hint=selected[0]?.title||'downloads';
-  const res=await apiFetch('/api/start-download',{urls:selected.map(i=>i.url),media_type:type,extension:ext,output_dir:dir,title_hint:hint});
+  const dir=document.getElementById('multi-outdir').value.trim(), hint=selected[0]?.display_title||selected[0]?.title||'downloads';
+  const items=selected.map(i=>({url:i.url, custom_title:(i.custom_title||i.display_title||'').trim()||i.title}));
+  const res=await apiFetch('/api/start-download',{items,media_type:type,extension:ext,output_dir:dir,title_hint:hint});
+  if(res.error) return alert(res.error);
   if(res.job_id){state.multi.jobId=res.job_id;pollProgress(res.job_id,'multi-progress');}
 }
 
@@ -572,7 +690,7 @@ async function fetchPlaylistInfo() {
     items=[{...info,url,_checked:true}];
     state.pl.meta=null;
   }
-  state.pl.items = markDuplicates(items);
+  state.pl.items = markDuplicates(await convertTitles(items));
   renderPlaylist();
   document.getElementById('pl-list-card').classList.remove('hidden');
   document.getElementById('pl-format-card').classList.remove('hidden');
@@ -580,11 +698,11 @@ async function fetchPlaylistInfo() {
 
 function renderPlaylist() {
   const cat = document.getElementById('pl-cat-filter').value;
-  const visible = state.pl.items.filter(i => {
-    const catOk = !cat || i.category===cat;
-    return durInRange(i,'pl-min','pl-max') && catOk;
+  const visible = state.pl.items.map((item, idx) => ({ item, idx })).filter(({ item }) => {
+    const catOk = !cat || item.category===cat;
+    return durInRange(item,'pl-min','pl-max') && catOk && langMatch(item,'pl-lang-filter');
   });
-  document.getElementById('pl-list').innerHTML = visible.map((item,idx)=>itemHTML(item,'pl',idx)).join('');
+  document.getElementById('pl-list').innerHTML = visible.map(({item,idx})=>itemHTML(item,'pl',idx)).join('');
   updatePlCount();
 }
 function filterPlaylist() { renderPlaylist(); }
@@ -592,20 +710,25 @@ function clearPlFilter() {
   document.getElementById('pl-min').value='';
   document.getElementById('pl-max').value='';
   document.getElementById('pl-cat-filter').value='';
+  document.getElementById('pl-lang-filter').value='';
   renderPlaylist();
 }
-function togglePlCheck(idx) { if(!state.pl.items[idx]._duplicate){state.pl.items[idx]._checked=!state.pl.items[idx]._checked;} renderPlaylist(); }
-function selectAllPl(v) { state.pl.items.forEach(i=>{ if(!i._duplicate) i._checked=v; }); renderPlaylist(); }
+function togglePlCheck(idx) { if(!isItemUnavailable(state.pl.items[idx])){state.pl.items[idx]._checked=!state.pl.items[idx]._checked;} renderPlaylist(); }
+function selectAllPl(v) { state.pl.items.forEach(i=>{ if(!isItemUnavailable(i)) i._checked=v; }); renderPlaylist(); }
 function updatePlCount() {
-  const checked=state.pl.items.filter(i=>i._checked&&!i._duplicate).length;
-  document.getElementById('pl-count').textContent=`${checked} / ${state.pl.items.length} 已選`;
+  const selectable=state.pl.items.filter(i=>!isItemUnavailable(i)).length;
+  const checked=state.pl.items.filter(i=>i._checked&&!isItemUnavailable(i)).length;
+  const unavailable=state.pl.items.length-selectable;
+  document.getElementById('pl-count').textContent=`${checked} / ${selectable} 已選${unavailable ? `（${unavailable} 個不可選）` : ''}`;
 }
 async function startPlaylistDownload() {
-  const selected=state.pl.items.filter(i=>i._checked&&!i._duplicate);
+  const selected=state.pl.items.filter(i=>i._checked&&!isItemUnavailable(i));
   if(!selected.length) return alert('請至少選擇一個影片');
   const type=document.getElementById('pl-type').value, ext=document.getElementById('pl-ext').value;
-  const dir=document.getElementById('pl-outdir').value.trim(), hint=state.pl.meta?.title||selected[0]?.title||'playlist';
-  const res=await apiFetch('/api/start-download',{urls:selected.map(i=>i.url),media_type:type,extension:ext,output_dir:dir,title_hint:hint});
+  const dir=document.getElementById('pl-outdir').value.trim(), hint=state.pl.meta?.title||selected[0]?.display_title||selected[0]?.title||'playlist';
+  const items=selected.map(i=>({url:i.url, custom_title:(i.custom_title||i.display_title||'').trim()||i.title}));
+  const res=await apiFetch('/api/start-download',{items,media_type:type,extension:ext,output_dir:dir,title_hint:hint});
+  if(res.error) return alert(res.error);
   if(res.job_id){state.pl.jobId=res.job_id;pollProgress(res.job_id,'pl-progress');}
 }
 
@@ -638,30 +761,36 @@ async function fetchImportInfo() {
       if(!info.error) state.imp.items[i]={...state.imp.items[i],...info,_fetched:true};
     }
   }
-  state.imp.items=markDuplicates(state.imp.items);
+  state.imp.items=markDuplicates(await convertTitles(state.imp.items));
   setLoading('imp-fetch-icon',false);
   renderImportList();
 }
 
 function renderImportList() {
-  const visible=state.imp.items.filter(i=>durInRange(i,'imp-min','imp-max'));
-  document.getElementById('import-list').innerHTML=visible.map((item,idx)=>itemHTML(item,'imp',idx)).join('');
+  const visible=state.imp.items
+    .map((item, idx) => ({ item, idx }))
+    .filter(({ item })=>durInRange(item,'imp-min','imp-max') && langMatch(item,'imp-lang-filter'));
+  document.getElementById('import-list').innerHTML=visible.map(({item,idx})=>itemHTML(item,'imp',idx)).join('');
   updateImportCount();
 }
 function filterImportList(){renderImportList()}
-function clearImportFilter(){document.getElementById('imp-min').value='';document.getElementById('imp-max').value='';renderImportList()}
-function toggleImpCheck(idx){if(!state.imp.items[idx]._duplicate){state.imp.items[idx]._checked=!state.imp.items[idx]._checked;}renderImportList()}
-function selectAllImport(v){state.imp.items.forEach(i=>{if(!i._duplicate)i._checked=v});renderImportList()}
+function clearImportFilter(){document.getElementById('imp-min').value='';document.getElementById('imp-max').value='';document.getElementById('imp-lang-filter').value='';renderImportList()}
+function toggleImpCheck(idx){if(!isItemUnavailable(state.imp.items[idx])){state.imp.items[idx]._checked=!state.imp.items[idx]._checked;}renderImportList()}
+function selectAllImport(v){state.imp.items.forEach(i=>{if(!isItemUnavailable(i))i._checked=v});renderImportList()}
 function updateImportCount(){
-  const checked=state.imp.items.filter(i=>i._checked&&!i._duplicate).length;
-  document.getElementById('imp-count').textContent=`${checked} / ${state.imp.items.length} 已選`;
+  const selectable=state.imp.items.filter(i=>!isItemUnavailable(i)).length;
+  const checked=state.imp.items.filter(i=>i._checked&&!isItemUnavailable(i)).length;
+  const unavailable=state.imp.items.length-selectable;
+  document.getElementById('imp-count').textContent=`${checked} / ${selectable} 已選${unavailable ? `（${unavailable} 個不可選）` : ''}`;
 }
 async function startImportDownload(){
-  const selected=state.imp.items.filter(i=>i._checked&&!i._duplicate);
+  const selected=state.imp.items.filter(i=>i._checked&&!isItemUnavailable(i));
   if(!selected.length) return alert('請至少選擇一個項目');
   const type=document.getElementById('imp-type').value, ext=document.getElementById('imp-ext').value;
-  const dir=document.getElementById('imp-outdir').value.trim(), hint=selected[0]?.title||'imports';
-  const res=await apiFetch('/api/start-download',{urls:selected.map(i=>i.url),media_type:type,extension:ext,output_dir:dir,title_hint:hint});
+  const dir=document.getElementById('imp-outdir').value.trim(), hint=selected[0]?.display_title||selected[0]?.title||'imports';
+  const items=selected.map(i=>({url:i.url, custom_title:(i.custom_title||i.display_title||'').trim()||i.title}));
+  const res=await apiFetch('/api/start-download',{items,media_type:type,extension:ext,output_dir:dir,title_hint:hint});
+  if(res.error) return alert(res.error);
   if(res.job_id){state.imp.jobId=res.job_id;pollProgress(res.job_id,'import-progress');}
 }
 
@@ -749,6 +878,16 @@ async function deleteCookie(){
 }
 
 checkCookieStatus();
+
+async function loadDefaultDir() {
+  const res = await fetch('/api/default-dir').then(r => r.json());
+  const dirs = ['single-outdir','multi-outdir','pl-outdir','imp-outdir'];
+  dirs.forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.placeholder = res.path + '\\{影片標題}';
+  });
+}
+loadDefaultDir();
 </script>
 </body>
 </html>

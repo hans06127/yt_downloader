@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import threading
 import uuid
 import datetime
@@ -7,7 +8,26 @@ from flask import Flask, render_template, request, jsonify, send_from_directory
 from flask_cors import CORS
 import yt_dlp
 import openpyxl
+import opencc
 from pathlib import Path
+
+# OpenCC converter: Simplified → Traditional
+_s2t = opencc.OpenCC('s2t')
+
+def s2t_title(text):
+    """
+    Convert simplified Chinese to traditional Chinese if needed.
+    If the text has no Chinese or is already traditional, return as-is.
+    Returns (converted_title, was_converted).
+    """
+    if not text:
+        return text, False
+    chinese_chars = [c for c in text if '\u4e00' <= c <= '\u9fff']
+    if not chinese_chars:
+        return text, False
+    converted = _s2t.convert(text)
+    was_converted = converted != text
+    return converted, was_converted
 
 app = Flask(__name__)
 CORS(app)
@@ -17,6 +37,65 @@ download_jobs = {}
 
 # Cookie file path
 COOKIE_FILE = Path(__file__).parent / "cookies.txt"
+PRIVATE_VIDEO_MESSAGE = "私人影片無法下載"
+YOUTUBE_RATE_LIMIT_MESSAGE = (
+    "YouTube 暫時限制請求（HTTP 429：Too Many Requests）。"
+    "請等 10-30 分鐘後再試，或更新 cookies.txt、減少連續查詢次數。"
+)
+ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+def clean_error_message(error):
+    """Strip terminal color codes and return a UI-friendly message."""
+    message = ANSI_RE.sub("", str(error or "")).strip()
+    if "HTTP Error 429" in message or "Too Many Requests" in message:
+        return YOUTUBE_RATE_LIMIT_MESSAGE
+    return message or "發生未知錯誤"
+
+def is_private_video_info(info, error_message=""):
+    """Best-effort detection for private YouTube videos from yt-dlp data/errors."""
+    if not isinstance(info, dict):
+        info = {}
+
+    availability = str(info.get("availability") or "").lower()
+    privacy = str(info.get("privacy") or "").lower()
+    title = str(info.get("title") or "")
+    combined = " ".join([
+        title,
+        str(info.get("description") or ""),
+        str(info.get("message") or ""),
+        str(info.get("error") or ""),
+        str(error_message or ""),
+    ]).lower()
+
+    return (
+        availability == "private"
+        or privacy == "private"
+        or "private video" in combined
+        or "this video is private" in combined
+        or "私人影片" in combined
+    )
+
+def private_video_payload(url, title=None, video_id=""):
+    """Return a UI-friendly unavailable item for private videos."""
+    raw_title = str(title or "")
+    display_title = raw_title if raw_title and "private video" not in raw_title.lower() else "私人影片"
+    return {
+        "type": "video",
+        "id": video_id,
+        "title": display_title,
+        "orig_title": raw_title or display_title,
+        "was_converted": False,
+        "url": url,
+        "duration": None,
+        "duration_str": "Unknown",
+        "category": None,
+        "uploader": "",
+        "thumbnail": "",
+        "lang": "other",
+        "is_private": True,
+        "downloadable": False,
+        "unavailable_reason": PRIVATE_VIDEO_MESSAGE,
+    }
 
 def get_cookie_opt():
     """Return cookiefile path if cookies.txt exists"""
@@ -24,11 +103,15 @@ def get_cookie_opt():
         return str(COOKIE_FILE)
     return None
 
+def get_system_downloads_dir():
+    """Get the system default Downloads directory"""
+    return Path.home() / "Downloads"
+
 def get_default_output_dir(title_hint="downloads"):
-    """Create a default output directory based on playlist/song name"""
+    """Create output directory inside system Downloads folder"""
     safe_name = "".join(c for c in title_hint if c.isalnum() or c in (' ', '-', '_')).strip()
     safe_name = safe_name[:50] if safe_name else "downloads"
-    base_dir = Path(__file__).parent / safe_name
+    base_dir = get_system_downloads_dir() / safe_name
     base_dir.mkdir(parents=True, exist_ok=True)
     return str(base_dir)
 
@@ -67,6 +150,11 @@ def build_ydl_opts_base(extra=None):
         "quiet": True,
         "no_warnings": True,
         "remote_components": "ejs:github",
+        "retries": 3,
+        "extractor_retries": 3,
+        "fragment_retries": 3,
+        "sleep_interval_requests": 1,
+        "socket_timeout": 30,
     }
     cookie = get_cookie_opt()
     if cookie:
@@ -85,7 +173,7 @@ def fetch_info(url):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             if info is None:
-                return None
+                return {"error": "無法取得影片資訊"}
 
             if info.get("_type") == "playlist":
                 entries = info.get("entries", [])
@@ -93,14 +181,29 @@ def fetch_info(url):
                 for e in entries:
                     if e:
                         duration = e.get("duration")
+                        orig_title = e.get("title", "Unknown")
+                        url_value = e.get("url") or e.get("webpage_url") or f"https://www.youtube.com/watch?v={e.get('id','')}"
+                        if is_private_video_info(e):
+                            item = private_video_payload(url_value, orig_title, e.get("id", ""))
+                            item["duration"] = duration
+                            item["duration_str"] = format_duration(duration)
+                            items.append(item)
+                            continue
+
+                        conv_title, was_conv = s2t_title(orig_title)
                         items.append({
                             "id": e.get("id", ""),
-                            "title": e.get("title", "Unknown"),
-                            "url": e.get("url") or e.get("webpage_url") or f"https://www.youtube.com/watch?v={e.get('id','')}",
+                            "title": conv_title,
+                            "orig_title": orig_title,
+                            "was_converted": was_conv,
+                            "url": url_value,
                             "duration": duration,
                             "duration_str": format_duration(duration),
                             "category": e.get("categories", [None])[0] if e.get("categories") else None,
                             "uploader": e.get("uploader", ""),
+                            "lang": "zh-CN" if was_conv else "other",
+                            "downloadable": True,
+                            "is_private": False,
                         })
                 return {
                     "type": "playlist",
@@ -111,18 +214,34 @@ def fetch_info(url):
                 }
             else:
                 duration = info.get("duration")
+                orig_title = info.get("title", "Unknown")
+                if is_private_video_info(info):
+                    payload = private_video_payload(url, orig_title, info.get("id", ""))
+                    payload["duration"] = duration
+                    payload["duration_str"] = format_duration(duration)
+                    return payload
+
+                conv_title, was_conv = s2t_title(orig_title)
                 return {
                     "type": "video",
-                    "title": info.get("title", "Unknown"),
+                    "title": conv_title,
+                    "orig_title": orig_title,
+                    "was_converted": was_conv,
                     "url": url,
                     "duration": duration,
                     "duration_str": format_duration(duration),
                     "category": info.get("categories", [None])[0] if info.get("categories") else None,
                     "uploader": info.get("uploader", ""),
                     "thumbnail": info.get("thumbnail", ""),
+                    "lang": "zh-CN" if was_conv else "other",
+                    "downloadable": True,
+                    "is_private": False,
                 }
     except Exception as e:
-        return {"error": str(e)}
+        message = clean_error_message(e)
+        if is_private_video_info({}, message):
+            return private_video_payload(url)
+        return {"error": message}
 
 def format_duration(seconds):
     if not seconds:
@@ -135,11 +254,11 @@ def format_duration(seconds):
         return f"{h}:{m:02d}:{s:02d}"
     return f"{m}:{s:02d}"
 
-def download_worker(job_id, urls, media_type, extension, output_dir, title_hint):
-    """Background download worker"""
+def download_worker(job_id, items, media_type, extension, output_dir, title_hint):
+    """Background download worker. items = list of {url, custom_title}"""
     job = download_jobs[job_id]
     job["status"] = "running"
-    job["total"] = len(urls)
+    job["total"] = len(items)
     job["completed"] = 0
     job["failed"] = 0
     job["log"] = []
@@ -163,32 +282,41 @@ def download_worker(job_id, urls, media_type, extension, output_dir, title_hint)
 
     fmt = get_format_string(media_type, extension)
     postprocessors = get_postprocessors(media_type, extension)
-    outtmpl = os.path.join(output_dir, "%(title)s.%(ext)s")
 
-    ydl_opts = build_ydl_opts_base({
-        "format": fmt,
-        "outtmpl": outtmpl,
-        "progress_hooks": [progress_hook],
-        "postprocessors": postprocessors,
-    })
-
-    if media_type == "video" and extension in ["mkv", "avi", "mov"]:
-        ydl_opts["merge_output_format"] = extension
-
-    for i, url in enumerate(urls):
+    for i, item in enumerate(items):
         if job.get("cancelled"):
             break
+        url = item["url"]
+        custom_title = item.get("custom_title", "").strip() or None
         job["current_index"] = i + 1
         job["current_url"] = url
         job["current_percent"] = 0
+
+        # Use custom title if provided, else use yt-dlp default %(title)s
+        if custom_title:
+            # Sanitize filename
+            safe = "".join(c for c in custom_title if c not in r'\/:*?"<>|').strip()
+            outtmpl = os.path.join(output_dir, f"{safe}.%(ext)s")
+        else:
+            outtmpl = os.path.join(output_dir, "%(title)s.%(ext)s")
+
+        ydl_opts = build_ydl_opts_base({
+            "format": fmt,
+            "outtmpl": outtmpl,
+            "progress_hooks": [progress_hook],
+            "postprocessors": postprocessors,
+        })
+        if media_type == "video" and extension in ["mkv", "avi", "mov"]:
+            ydl_opts["merge_output_format"] = extension
+
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
             job["completed"] += 1
-            job["log"].append({"url": url, "status": "success"})
+            job["log"].append({"url": url, "title": custom_title or url, "status": "success"})
         except Exception as e:
             job["failed"] += 1
-            job["log"].append({"url": url, "status": "error", "message": str(e)})
+            job["log"].append({"url": url, "title": custom_title or url, "status": "error", "message": clean_error_message(e)})
 
     job["status"] = "done" if not job.get("cancelled") else "cancelled"
     job["current_percent"] = 100
@@ -198,9 +326,21 @@ def download_worker(job_id, urls, media_type, extension, output_dir, title_hint)
 def index():
     return render_template("index.html")
 
+@app.route("/api/default-dir")
+def api_default_dir():
+    return jsonify({"path": str(get_system_downloads_dir())})
+
+@app.route("/api/convert-titles", methods=["POST"])
+def api_convert_titles():
+    """Convert simplified Chinese titles to traditional Chinese"""
+    data = request.json
+    titles = data.get("titles", [])
+    converted = [_s2t.convert(t) if isinstance(t, str) else (t or '') for t in titles]
+    return jsonify({"converted": converted})
+
 @app.route("/api/fetch-info", methods=["POST"])
 def api_fetch_info():
-    data = request.json
+    data = request.json or {}
     url = data.get("url", "").strip()
     if not url:
         return jsonify({"error": "No URL provided"}), 400
@@ -236,20 +376,37 @@ def api_parse_import():
 
 @app.route("/api/start-download", methods=["POST"])
 def api_start_download():
-    data = request.json
-    urls = data.get("urls", [])
+    data = request.json or {}
+    # Accept either old format {urls:[]} or new format {items:[{url, custom_title}]}
+    raw_items = data.get("items", [])
+    had_input = bool(raw_items or data.get("urls", []))
+    if not raw_items:
+        # fallback: old format
+        raw_items = [{"url": u, "custom_title": ""} for u in data.get("urls", [])]
+    normalized_items = []
+    for item in raw_items:
+        if isinstance(item, str):
+            item = {"url": item, "custom_title": ""}
+        if not isinstance(item, dict):
+            continue
+        if item.get("is_private") or item.get("downloadable") is False:
+            continue
+        if item.get("url"):
+            normalized_items.append(item)
+    raw_items = normalized_items
+
     media_type = data.get("media_type", "video")
     extension = data.get("extension", "mp4")
     output_dir = data.get("output_dir", "")
     title_hint = data.get("title_hint", "downloads")
 
-    if not urls:
-        return jsonify({"error": "No URLs"}), 400
+    if not raw_items:
+        return jsonify({"error": PRIVATE_VIDEO_MESSAGE if had_input else "No URLs"}), 400
 
     job_id = str(uuid.uuid4())
     download_jobs[job_id] = {
         "status": "queued",
-        "total": len(urls),
+        "total": len(raw_items),
         "completed": 0,
         "failed": 0,
         "current_index": 0,
@@ -262,7 +419,7 @@ def api_start_download():
 
     t = threading.Thread(
         target=download_worker,
-        args=(job_id, urls, media_type, extension, output_dir, title_hint),
+        args=(job_id, raw_items, media_type, extension, output_dir, title_hint),
         daemon=True,
     )
     t.start()
