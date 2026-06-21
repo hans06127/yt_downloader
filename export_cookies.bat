@@ -4,34 +4,45 @@ echo ========================================
 echo   YouTube Cookie Exporter
 echo ========================================
 echo.
-echo 此工具將從 Chrome 匯出 YouTube cookies
-echo 並儲存到專案目錄的 cookies.txt
-echo 請確認 Chrome 已完全關閉再繼續
+echo 請選擇你登入 YouTube 的瀏覽器：
 echo.
-pause
+echo  [1] Chrome
+echo  [2] Edge
+echo  [3] Firefox
+echo  [4] Brave
+echo  [5] Opera
+echo.
+set /p CHOICE=輸入數字 (1-5)：
 
-set COOKIE_DST=D:\self\yt_downloader\cookies.txt
+if "%CHOICE%"=="1" set BROWSER=chrome
+if "%CHOICE%"=="2" set BROWSER=edge
+if "%CHOICE%"=="3" set BROWSER=firefox
+if "%CHOICE%"=="4" set BROWSER=brave
+if "%CHOICE%"=="5" set BROWSER=opera
+
+if "%BROWSER%"=="" (
+    echo 無效選擇
+    pause
+    exit /b 1
+)
 
 echo.
-echo 正在嘗試從 Chrome 匯出 cookies...
+echo 正在從 %BROWSER% 匯出 YouTube cookies...
+echo 如果失敗請先關閉 %BROWSER% 再重試
 echo.
 
-yt-dlp --cookies-from-browser chrome --skip-download --quiet "https://www.youtube.com" --cookies "%COOKIE_DST%" 2>nul
+cd /d "%~dp0"
+set COOKIE_DST=%~dp0cookies.txt
+
+python -m yt_dlp --cookies-from-browser %BROWSER% --skip-download --quiet "https://www.youtube.com" --cookies "%COOKIE_DST%" 2>nul
 
 if exist "%COOKIE_DST%" (
-    echo [成功] cookies.txt 已儲存到:
-    echo %COOKIE_DST%
-    echo.
-    echo 如果網站已在執行中，直接使用即可（自動載入）
-    echo 如果使用 exe 版本，請在網站介面上傳此 cookies.txt
+    echo [成功] cookies.txt 已儲存到專案目錄
+    echo 請回到網站上傳此 cookies.txt
 ) else (
-    echo [失敗] 無法自動匯出
-    echo.
-    echo 請改用手動方式：
-    echo 1. 安裝 Chrome 擴充功能 "Get cookies.txt LOCALLY"
-    echo 2. 開啟 YouTube 確認已登入
-    echo 3. 點擴充功能圖示 Export
-    echo 4. 到網站介面上傳匯出的 cookies.txt
+    echo [失敗] 無法匯出，請嘗試以下方式：
+    echo 1. 關閉 %BROWSER% 後重試
+    echo 2. 確認已在 %BROWSER% 登入 YouTube
 )
 
 echo.

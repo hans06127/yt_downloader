@@ -4,7 +4,7 @@
 a = Analysis(
     ['launcher.py'],
     pathex=[],
-    binaries=[('D:\\self\\ffmpeg-8.1.1-essentials_build\\bin\\ffmpeg.exe', '.'), ('D:\\self\\ffmpeg-8.1.1-essentials_build\\bin\\ffmpeg.exe', '.'), ('C:\\Users\\User\\AppData\\Local\\Microsoft\\WinGet\\Packages\\DenoLand.Deno_Microsoft.Winget.Source_8wekyb3d8bbwe\\deno.exe', '.')],
+    binaries=[('C:\\Users\\hans0\\Desktop\\Code\\yt_downloader\\bin\\ffmpeg.exe', '.'), ('C:\\Users\\hans0\\Desktop\\Code\\yt_downloader\\bin\\ffprobe.exe', '.')],
     datas=[('templates', 'templates')],
     hiddenimports=[],
     hookspath=[],
