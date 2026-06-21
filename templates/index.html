@@ -69,7 +69,6 @@
   .video-item:hover{background:var(--surface);border-color:var(--border)}
   .video-item.selected{background:rgba(79,126,255,.1);border-color:var(--accent)}
   .video-item.duplicate{opacity:.5;cursor:not-allowed}
-  .video-item.unavailable{opacity:.65;cursor:not-allowed}
   .video-item input[type=checkbox]{flex-shrink:0;accent-color:var(--accent)}
   .video-title{flex:1;font-size:.82rem;line-height:1.3}
   .title-input{background:transparent;border:none;border-bottom:1px dashed var(--border);color:var(--text);font-size:.82rem;font-family:inherit;padding:1px 4px;width:100%;outline:none;transition:border-color .15s}
@@ -80,7 +79,6 @@
   .lang-tw{font-size:.68rem;padding:2px 6px;border-radius:4px;background:rgba(79,126,255,.15);color:var(--accent);white-space:nowrap}
   .lang-cn{font-size:.68rem;padding:2px 6px;border-radius:4px;background:rgba(124,92,252,.15);color:var(--accent2);white-space:nowrap}
   .dup-badge{font-size:.68rem;padding:2px 6px;border-radius:4px;background:rgba(243,156,18,.2);color:var(--warn);white-space:nowrap}
-  .unavailable-badge{font-size:.68rem;padding:2px 6px;border-radius:4px;background:rgba(231,76,60,.18);color:var(--danger);white-space:nowrap}
 
   .select-bar{display:flex;gap:6px;align-items:center;margin-bottom:8px;flex-wrap:wrap}
   .count-badge{font-size:.75rem;color:var(--muted);margin-left:auto}
@@ -440,24 +438,9 @@ function setLoading(iconId, loading) {
 }
 
 // ── Duplicate detection ──
-function isItemUnavailable(item) {
-  return Boolean(item?._duplicate || item?.is_private || item?.downloadable === false);
-}
-
-function unavailableReason(item) {
-  if (item?.is_private) return item.unavailable_reason || '私人影片無法下載';
-  if (item?._duplicate) return '重複';
-  return item?.unavailable_reason || '無法下載';
-}
-
 function markDuplicates(items) {
   const seen = new Map();
   items.forEach((item, idx) => {
-    if (item.is_private || item.downloadable === false) {
-      item._duplicate = false;
-      item._checked = false;
-      return;
-    }
     const key = (item.title || '').trim().toLowerCase();
     if (key && seen.has(key)) {
       item._duplicate = true;
@@ -500,45 +483,74 @@ async function convertTitles(items) {
 
 // ── Item HTML with editable title ──
 function itemHTML(item, prefix, idx) {
+  const isPrivate = item.is_private;
   const isDup = item._duplicate;
-  const isUnavailable = isItemUnavailable(item);
-  const checked = (!isUnavailable && item._checked) ? 'checked' : '';
-  const disabled = isUnavailable ? 'disabled' : '';
-  const selectedCls = (!isUnavailable && item._checked) ? 'selected' : '';
-  const dupCls = isDup ? 'duplicate' : '';
-  const unavailableCls = isUnavailable ? 'unavailable' : '';
-  const toggle = isUnavailable ? '' : `toggle${prefix.charAt(0).toUpperCase()+prefix.slice(1)}Check(${idx})`;
-  const onclick = isUnavailable ? '' : `onclick="${toggle}"`;
-  const catBadge = item.category ? `<span class="video-cat">${esc(item.category)}</span>` : '';
-  const dupBadge = isDup ? `<span class="dup-badge">重複</span>` : '';
-  const unavailableBadge = (isUnavailable && !isDup) ? `<span class="unavailable-badge">${esc(unavailableReason(item))}</span>` : '';
-  const wasConverted = item.display_title && item.display_title !== item.title;
-  const displayVal = item.custom_title || item.display_title || item.title || unavailableReason(item);
-  const convertedCls = wasConverted ? 'title-converted' : '';
-  let langBadge = '';
-  if (item.lang === 'zh-TW') langBadge = `<span class="lang-tw">繁中</span>`;
-  else if (item.lang === 'zh-CN') langBadge = `<span class="lang-cn">簡中</span>`;
+  const isDisabled = isPrivate || isDup;
+  const checked = (!isDisabled && item._checked) ? 'checked' : '';
+  const selectedCls = (!isDisabled && item._checked) ? 'selected' : '';
+  const dimCls = isPrivate ? 'private' : isDup ? 'duplicate' : '';
+  const displayVal = item.custom_title || item.title || '';
+  const wasConverted = item.was_converted && !isPrivate;
 
-  return `<div class="video-item ${selectedCls} ${dupCls} ${unavailableCls}" ${onclick}>
-    <input type="checkbox" ${checked} ${disabled} onclick="event.stopPropagation();${toggle}">
+  let badge = '';
+  if (isPrivate) badge = `<span class="dup-badge" style="background:rgba(231,76,60,.2);color:var(--danger)">🔒 私人</span>`;
+  else if (isDup) badge = `<span class="dup-badge">重複</span>`;
+
+  let langBadge = '';
+  if (!isPrivate) {
+    if (item.lang === 'zh-TW') langBadge = `<span class="lang-tw">繁中</span>`;
+    else if (item.lang === 'zh-CN') langBadge = `<span class="lang-cn">簡中</span>`;
+  }
+  const catBadge = item.category ? `<span class="video-cat">${esc(item.category)}</span>` : '';
+
+  return `<div class="video-item ${selectedCls} ${dimCls}" data-prefix="${prefix}" data-idx="${idx}" onclick="handleItemClick(event,this)">
+    <input type="checkbox" ${checked} ${isDisabled?'disabled':''} onclick="event.stopPropagation();handleCheckbox(this)">
     <div class="video-title">
-      <input class="title-input ${convertedCls}" value="${esc(displayVal)}"
+      <input class="title-input${wasConverted?' title-converted':''}" value="${esc(displayVal)}"
         onclick="event.stopPropagation()"
-        onchange="updateCustomTitle('${prefix}',${idx},this.value)"
         oninput="updateCustomTitle('${prefix}',${idx},this.value)"
-        title="${wasConverted ? '原標題: '+esc(item.title) : ''}"
-        ${isUnavailable?'disabled':''}>
+        title="${wasConverted ? '原標題: '+esc(item.orig_title||'') : ''}"
+        ${isDisabled?'disabled':''}>
     </div>
-    ${langBadge}${catBadge}${dupBadge}${unavailableBadge}
+    ${langBadge}${catBadge}${badge}
     <div class="video-dur">${item.duration_str || formatDur(item.duration)}</div>
   </div>`;
 }
 
+function handleItemClick(e, el) {
+  const prefix = el.dataset.prefix;
+  const idx = parseInt(el.dataset.idx);
+  const items = getItems(prefix);
+  if (!items[idx] || items[idx].is_private || items[idx]._duplicate) return;
+  items[idx]._checked = !items[idx]._checked;
+  rerender(prefix);
+}
+
+function handleCheckbox(cb) {
+  const el = cb.closest('.video-item');
+  const prefix = el.dataset.prefix;
+  const idx = parseInt(el.dataset.idx);
+  const items = getItems(prefix);
+  if (!items[idx] || items[idx].is_private || items[idx]._duplicate) return;
+  items[idx]._checked = cb.checked;
+  rerender(prefix);
+}
+
+function getItems(prefix) {
+  if (prefix === 'pl') return state.pl.items;
+  if (prefix === 'imp') return state.imp.items;
+  return state.multi.items;
+}
+
+function rerender(prefix) {
+  if (prefix === 'pl') { renderPlaylist(); }
+  else if (prefix === 'imp') { renderImportList(); }
+  else { renderMultiList(); }
+}
+
 function updateCustomTitle(prefix, idx, val) {
-  const trimmed = val.trim();
-  const stateKey = prefix === 'pl' ? 'pl' : prefix === 'imp' ? 'imp' : prefix;
-  const items = stateKey === 'pl' ? state.pl.items : stateKey === 'imp' ? state.imp.items : state.multi.items;
-  if (items[idx]) items[idx].custom_title = trimmed;
+  const items = getItems(prefix);
+  if (items[idx]) items[idx].custom_title = val.trim();
 }
 
 // ── Language filter helper ──
@@ -558,20 +570,9 @@ async function fetchSingleInfo() {
   const div = document.getElementById('single-info');
   if (info.error) {
     div.innerHTML = `<div style="color:var(--danger);font-size:.8rem">⚠ ${esc(info.error)}</div>`;
-    document.getElementById('single-format-card').classList.add('hidden');
     div.classList.remove('hidden'); return;
   }
   state.single.info = info;
-  if (isItemUnavailable(info)) {
-    const displayTitle = info.display_title || info.title || unavailableReason(info);
-    div.innerHTML = `<div class="info-panel"><strong style="font-size:.9rem">${esc(displayTitle)}</strong>
-      <div class="info-meta">
-        <span class="unavailable-badge">${esc(unavailableReason(info))}</span>
-      </div></div>`;
-    div.classList.remove('hidden');
-    document.getElementById('single-format-card').classList.add('hidden');
-    return;
-  }
   // Convert title s2t
   const conv = await apiFetch('/api/convert-titles', {titles: [info.title]});
   if (conv.converted) info.display_title = conv.converted[0];
@@ -594,11 +595,9 @@ async function startSingleDownload() {
   const ext  = document.getElementById('single-ext').value;
   const dir  = document.getElementById('single-outdir').value.trim();
   const info = state.single.info;
-  if (isItemUnavailable(info)) return alert(unavailableReason(info));
   const hint = info?.display_title || info?.title || 'download';
   const items = [{url, custom_title: hint}];
   const res  = await apiFetch('/api/start-download', {items, media_type:type, extension:ext, output_dir:dir, title_hint:hint});
-  if (res.error) return alert(res.error);
   if (res.job_id) { state.single.jobId = res.job_id; pollProgress(res.job_id, 'single-progress'); }
 }
 
@@ -632,30 +631,24 @@ async function fetchMultiInfo() {
 }
 
 function renderMultiList() {
-  const visible = state.multi.items
-    .map((item, idx) => ({ item, idx }))
-    .filter(({ item }) => durInRange(item,'multi-min','multi-max') && langMatch(item,'multi-lang-filter'));
-  document.getElementById('multi-list').innerHTML = visible.map(({item,idx})=>itemHTML(item,'multi',idx)).join('');
+  const visible = state.multi.items.filter(i => durInRange(i,'multi-min','multi-max') && langMatch(i,'multi-lang-filter'));
+  document.getElementById('multi-list').innerHTML = visible.map((item,idx)=>itemHTML(item,'multi',idx)).join('');
   updateMultiCount();
 }
 function filterMultiList() { renderMultiList(); }
 function clearMultiFilter() { document.getElementById('multi-min').value=''; document.getElementById('multi-max').value=''; document.getElementById('multi-lang-filter').value=''; renderMultiList(); }
-function toggleMultiCheck(idx) { if(!isItemUnavailable(state.multi.items[idx])){state.multi.items[idx]._checked=!state.multi.items[idx]._checked;} renderMultiList(); }
-function selectAllMulti(v) { state.multi.items.forEach(i=>{ if(!isItemUnavailable(i)) i._checked=v; }); renderMultiList(); }
+function selectAllMulti(v) { state.multi.items.forEach(i=>{ if(!i._duplicate&&!i.is_private) i._checked=v; }); renderMultiList(); }
 function updateMultiCount() {
-  const selectable=state.multi.items.filter(i=>!isItemUnavailable(i)).length;
-  const checked=state.multi.items.filter(i=>i._checked&&!isItemUnavailable(i)).length;
-  const unavailable=state.multi.items.length-selectable;
-  document.getElementById('multi-count').textContent=`${checked} / ${selectable} 已選${unavailable ? `（${unavailable} 個不可選）` : ''}`;
+  const checked=state.multi.items.filter(i=>i._checked&&!i._duplicate&&!i.is_private).length;
+  document.getElementById('multi-count').textContent=`${checked} / ${state.multi.items.length} 已選`;
 }
 async function startMultiDownload() {
-  const selected=state.multi.items.filter(i=>i._checked&&!isItemUnavailable(i));
+  const selected=state.multi.items.filter(i=>i._checked&&!i._duplicate);
   if(!selected.length) return alert('請至少選擇一個影片');
   const type=document.getElementById('multi-type').value, ext=document.getElementById('multi-ext').value;
   const dir=document.getElementById('multi-outdir').value.trim(), hint=selected[0]?.display_title||selected[0]?.title||'downloads';
   const items=selected.map(i=>({url:i.url, custom_title:(i.custom_title||i.display_title||'').trim()||i.title}));
   const res=await apiFetch('/api/start-download',{items,media_type:type,extension:ext,output_dir:dir,title_hint:hint});
-  if(res.error) return alert(res.error);
   if(res.job_id){state.multi.jobId=res.job_id;pollProgress(res.job_id,'multi-progress');}
 }
 
@@ -664,45 +657,153 @@ async function fetchPlaylistInfo() {
   const url = document.getElementById('pl-url').value.trim();
   if (!url) return;
   setLoading('pl-fetch-icon', true);
-  const info = await apiFetch('/api/fetch-info', {url});
-  setLoading('pl-fetch-icon', false);
   const metaDiv = document.getElementById('pl-meta');
-  if (info.error) {
-    metaDiv.innerHTML=`<div style="color:var(--danger);font-size:.8rem">⚠ ${esc(info.error)}</div>`;
-    metaDiv.classList.remove('hidden'); return;
+
+  // Reset state
+  state.pl.items = [];
+  state.pl.meta = null;
+  document.getElementById('pl-list').innerHTML = '';
+  document.getElementById('pl-list-card').classList.add('hidden');
+  document.getElementById('pl-format-card').classList.add('hidden');
+
+  // Check if it's a playlist URL
+  const isPlaylist = url.includes('list=') || url.includes('playlist');
+
+  if (!isPlaylist) {
+    // Single video fallback
+    const info = await apiFetch('/api/fetch-info', {url});
+    setLoading('pl-fetch-icon', false);
+    if (info.error) {
+      metaDiv.innerHTML=`<div style="color:var(--danger);font-size:.8rem">⚠ ${esc(info.error)}</div>`;
+      metaDiv.classList.remove('hidden'); return;
+    }
+    state.pl.items = markDuplicates(await convertTitles([{...info, url, _checked:true}]));
+    state.pl.meta = null;
+    renderPlaylist();
+    document.getElementById('pl-list-card').classList.remove('hidden');
+    document.getElementById('pl-format-card').classList.remove('hidden');
+    return;
   }
-  let items = [];
-  if (info.type==='playlist') {
-    items = info.items.map(i=>({...i,_checked:true}));
-    state.pl.meta = info;
-    metaDiv.innerHTML=`<div class="info-panel"><strong>${esc(info.title)}</strong>
-      <div class="info-meta">
-        <span class="info-badge playlist">📋 播放清單</span>
-        <span class="info-badge">${info.count} 部影片</span>
-        ${info.uploader?`<span class="info-badge">👤 ${esc(info.uploader)}</span>`:''}
-      </div></div>`;
-    metaDiv.classList.remove('hidden');
-    // Populate category filter - fetch individual video info for categories
-    const cats=[...new Set(items.map(i=>i.category).filter(Boolean))];
-    const catSel=document.getElementById('pl-cat-filter');
-    catSel.innerHTML='<option value="">全部類型</option>'+cats.map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join('');
-  } else {
-    items=[{...info,url,_checked:true}];
-    state.pl.meta=null;
+
+  // SSE streaming for playlists
+  metaDiv.innerHTML = `<div class="info-panel"><div style="display:flex;align-items:center;gap:8px"><span class="spinner"></span><span>載入播放清單中...</span></div><div id="pl-load-progress" style="font-size:.78rem;color:var(--muted);margin-top:6px"></div></div>`;
+  metaDiv.classList.remove('hidden');
+
+  const response = await fetch('/api/fetch-playlist-stream', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({url})
+  });
+
+  if (!response.ok || !response.body) {
+    metaDiv.innerHTML=`<div style="color:var(--danger);font-size:.8rem">播放清單載入失敗 (${response.status})</div>`;
+    setLoading('pl-fetch-icon', false);
+    return;
   }
-  state.pl.items = markDuplicates(await convertTitles(items));
-  renderPlaylist();
-  document.getElementById('pl-list-card').classList.remove('hidden');
-  document.getElementById('pl-format-card').classList.remove('hidden');
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let total = 0;
+
+  while (true) {
+    const {done, value} = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, {stream: true});
+    const lines = buffer.split('\n');
+    buffer = lines.pop();
+
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue;
+      const raw = line.slice(6).trim();
+      if (!raw) continue;
+      let msg;
+      try { msg = JSON.parse(raw); } catch(e) { continue; }
+
+      if (msg.error) {
+        metaDiv.innerHTML=`<div style="color:var(--danger);font-size:.8rem">⚠ ${esc(msg.error)}</div>`;
+        setLoading('pl-fetch-icon', false);
+        return;
+      }
+
+      if (msg.type === 'header' || msg.type === 'meta') {
+        total = msg.total;
+        state.pl.meta = {title: msg.title, uploader: msg.uploader, count: msg.total};
+        metaDiv.innerHTML = `<div class="info-panel">
+          <strong>${esc(msg.title)}</strong>
+          <div class="info-meta" style="margin-top:6px">
+            <span class="info-badge playlist">📋 播放清單</span>
+            <span class="info-badge" id="pl-count-badge">載入中...</span>
+            ${msg.uploader?`<span class="info-badge">👤 ${esc(msg.uploader)}</span>`:''}
+          </div>
+          <div id="pl-load-progress" style="font-size:.78rem;color:var(--muted);margin-top:6px">載入 0 / ${total} 首...</div>
+          <div class="progress-bar-bg" style="margin-top:6px"><div id="pl-load-bar" class="progress-bar-fill" style="width:0%"></div></div>
+        </div>`;
+        metaDiv.classList.remove('hidden');
+        document.getElementById('pl-list-card').classList.remove('hidden');
+        document.getElementById('pl-format-card').classList.remove('hidden');
+        // init category filter
+        document.getElementById('pl-cat-filter').innerHTML = '<option value="">全部類型</option>';
+      }
+
+      if (msg.type === 'item' || msg.type === 'chunk') {
+        const incoming = msg.type === 'chunk' ? (msg.items || []) : [msg];
+        if (msg.total) total = msg.total;
+
+        for (const rawItem of incoming) {
+          const item = {...rawItem, _checked: !rawItem.is_private};
+          delete item.type;
+          delete item.index;
+          state.pl.items.push(item);
+
+          // Add category to filter
+          if (item.category) {
+            const catSel = document.getElementById('pl-cat-filter');
+            const exists = [...catSel.options].some(o => o.value === item.category);
+            if (!exists) catSel.innerHTML += `<option value="${esc(item.category)}">${esc(item.category)}</option>`;
+          }
+        }
+
+        // Update progress
+        const loaded = msg.loaded || state.pl.items.length;
+        const pct = total ? Math.round(loaded/total*100) : 0;
+        const progEl = document.getElementById('pl-load-progress');
+        const barEl = document.getElementById('pl-load-bar');
+        const badgeEl = document.getElementById('pl-count-badge');
+        if (progEl) progEl.textContent = `載入 ${loaded} / ${total} 首...`;
+        if (barEl) barEl.style.width = pct + '%';
+        if (badgeEl) badgeEl.textContent = `${loaded} / ${total} 部影片`;
+
+        // Render every 20 items for performance
+        if (loaded % 20 === 0 || loaded === total) {
+          state.pl.items = markDuplicates(state.pl.items);
+          renderPlaylist();
+        }
+      }
+
+      if (msg.type === 'done') {
+        state.pl.items = markDuplicates(state.pl.items);
+        renderPlaylist();
+        const progEl = document.getElementById('pl-load-progress');
+        const barEl = document.getElementById('pl-load-bar');
+        const badgeEl = document.getElementById('pl-count-badge');
+        if (progEl) progEl.textContent = `✓ 全部載入完成，共 ${state.pl.items.length} 首`;
+        if (barEl) { barEl.style.width='100%'; barEl.classList.add('done'); }
+        if (badgeEl) badgeEl.textContent = `${state.pl.items.length} 部影片`;
+        setLoading('pl-fetch-icon', false);
+      }
+    }
+  }
+  setLoading('pl-fetch-icon', false);
 }
 
 function renderPlaylist() {
   const cat = document.getElementById('pl-cat-filter').value;
-  const visible = state.pl.items.map((item, idx) => ({ item, idx })).filter(({ item }) => {
-    const catOk = !cat || item.category===cat;
-    return durInRange(item,'pl-min','pl-max') && catOk && langMatch(item,'pl-lang-filter');
+  const visible = state.pl.items.filter(i => {
+    const catOk = !cat || i.category===cat;
+    return durInRange(i,'pl-min','pl-max') && catOk && langMatch(i,'pl-lang-filter');
   });
-  document.getElementById('pl-list').innerHTML = visible.map(({item,idx})=>itemHTML(item,'pl',idx)).join('');
+  document.getElementById('pl-list').innerHTML = visible.map((item,idx)=>itemHTML(item,'pl',idx)).join('');
   updatePlCount();
 }
 function filterPlaylist() { renderPlaylist(); }
@@ -713,22 +814,18 @@ function clearPlFilter() {
   document.getElementById('pl-lang-filter').value='';
   renderPlaylist();
 }
-function togglePlCheck(idx) { if(!isItemUnavailable(state.pl.items[idx])){state.pl.items[idx]._checked=!state.pl.items[idx]._checked;} renderPlaylist(); }
-function selectAllPl(v) { state.pl.items.forEach(i=>{ if(!isItemUnavailable(i)) i._checked=v; }); renderPlaylist(); }
+function selectAllPl(v) { state.pl.items.forEach(i=>{ if(!i._duplicate&&!i.is_private) i._checked=v; }); renderPlaylist(); }
 function updatePlCount() {
-  const selectable=state.pl.items.filter(i=>!isItemUnavailable(i)).length;
-  const checked=state.pl.items.filter(i=>i._checked&&!isItemUnavailable(i)).length;
-  const unavailable=state.pl.items.length-selectable;
-  document.getElementById('pl-count').textContent=`${checked} / ${selectable} 已選${unavailable ? `（${unavailable} 個不可選）` : ''}`;
+  const checked=state.pl.items.filter(i=>i._checked&&!i._duplicate&&!i.is_private).length;
+  document.getElementById('pl-count').textContent=`${checked} / ${state.pl.items.length} 已選`;
 }
 async function startPlaylistDownload() {
-  const selected=state.pl.items.filter(i=>i._checked&&!isItemUnavailable(i));
+  const selected=state.pl.items.filter(i=>i._checked&&!i._duplicate);
   if(!selected.length) return alert('請至少選擇一個影片');
   const type=document.getElementById('pl-type').value, ext=document.getElementById('pl-ext').value;
   const dir=document.getElementById('pl-outdir').value.trim(), hint=state.pl.meta?.title||selected[0]?.display_title||selected[0]?.title||'playlist';
   const items=selected.map(i=>({url:i.url, custom_title:(i.custom_title||i.display_title||'').trim()||i.title}));
   const res=await apiFetch('/api/start-download',{items,media_type:type,extension:ext,output_dir:dir,title_hint:hint});
-  if(res.error) return alert(res.error);
   if(res.job_id){state.pl.jobId=res.job_id;pollProgress(res.job_id,'pl-progress');}
 }
 
@@ -767,30 +864,24 @@ async function fetchImportInfo() {
 }
 
 function renderImportList() {
-  const visible=state.imp.items
-    .map((item, idx) => ({ item, idx }))
-    .filter(({ item })=>durInRange(item,'imp-min','imp-max') && langMatch(item,'imp-lang-filter'));
-  document.getElementById('import-list').innerHTML=visible.map(({item,idx})=>itemHTML(item,'imp',idx)).join('');
+  const visible=state.imp.items.filter(i=>durInRange(i,'imp-min','imp-max') && langMatch(i,'imp-lang-filter'));
+  document.getElementById('import-list').innerHTML=visible.map((item,idx)=>itemHTML(item,'imp',idx)).join('');
   updateImportCount();
 }
 function filterImportList(){renderImportList()}
 function clearImportFilter(){document.getElementById('imp-min').value='';document.getElementById('imp-max').value='';document.getElementById('imp-lang-filter').value='';renderImportList()}
-function toggleImpCheck(idx){if(!isItemUnavailable(state.imp.items[idx])){state.imp.items[idx]._checked=!state.imp.items[idx]._checked;}renderImportList()}
-function selectAllImport(v){state.imp.items.forEach(i=>{if(!isItemUnavailable(i))i._checked=v});renderImportList()}
+function selectAllImport(v){state.imp.items.forEach(i=>{if(!i._duplicate&&!i.is_private)i._checked=v});renderImportList()}
 function updateImportCount(){
-  const selectable=state.imp.items.filter(i=>!isItemUnavailable(i)).length;
-  const checked=state.imp.items.filter(i=>i._checked&&!isItemUnavailable(i)).length;
-  const unavailable=state.imp.items.length-selectable;
-  document.getElementById('imp-count').textContent=`${checked} / ${selectable} 已選${unavailable ? `（${unavailable} 個不可選）` : ''}`;
+  const checked=state.imp.items.filter(i=>i._checked&&!i._duplicate&&!i.is_private).length;
+  document.getElementById('imp-count').textContent=`${checked} / ${state.imp.items.length} 已選`;
 }
 async function startImportDownload(){
-  const selected=state.imp.items.filter(i=>i._checked&&!isItemUnavailable(i));
+  const selected=state.imp.items.filter(i=>i._checked&&!i._duplicate);
   if(!selected.length) return alert('請至少選擇一個項目');
   const type=document.getElementById('imp-type').value, ext=document.getElementById('imp-ext').value;
   const dir=document.getElementById('imp-outdir').value.trim(), hint=selected[0]?.display_title||selected[0]?.title||'imports';
   const items=selected.map(i=>({url:i.url, custom_title:(i.custom_title||i.display_title||'').trim()||i.title}));
   const res=await apiFetch('/api/start-download',{items,media_type:type,extension:ext,output_dir:dir,title_hint:hint});
-  if(res.error) return alert(res.error);
   if(res.job_id){state.imp.jobId=res.job_id;pollProgress(res.job_id,'import-progress');}
 }
 

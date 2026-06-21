@@ -4,6 +4,9 @@ import re
 import threading
 import uuid
 import datetime
+import http.cookiejar
+import urllib.parse
+import urllib.request
 from flask import Flask, render_template, request, jsonify, send_from_directory
 from flask_cors import CORS
 import yt_dlp
@@ -37,65 +40,6 @@ download_jobs = {}
 
 # Cookie file path
 COOKIE_FILE = Path(__file__).parent / "cookies.txt"
-PRIVATE_VIDEO_MESSAGE = "私人影片無法下載"
-YOUTUBE_RATE_LIMIT_MESSAGE = (
-    "YouTube 暫時限制請求（HTTP 429：Too Many Requests）。"
-    "請等 10-30 分鐘後再試，或更新 cookies.txt、減少連續查詢次數。"
-)
-ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
-
-def clean_error_message(error):
-    """Strip terminal color codes and return a UI-friendly message."""
-    message = ANSI_RE.sub("", str(error or "")).strip()
-    if "HTTP Error 429" in message or "Too Many Requests" in message:
-        return YOUTUBE_RATE_LIMIT_MESSAGE
-    return message or "發生未知錯誤"
-
-def is_private_video_info(info, error_message=""):
-    """Best-effort detection for private YouTube videos from yt-dlp data/errors."""
-    if not isinstance(info, dict):
-        info = {}
-
-    availability = str(info.get("availability") or "").lower()
-    privacy = str(info.get("privacy") or "").lower()
-    title = str(info.get("title") or "")
-    combined = " ".join([
-        title,
-        str(info.get("description") or ""),
-        str(info.get("message") or ""),
-        str(info.get("error") or ""),
-        str(error_message or ""),
-    ]).lower()
-
-    return (
-        availability == "private"
-        or privacy == "private"
-        or "private video" in combined
-        or "this video is private" in combined
-        or "私人影片" in combined
-    )
-
-def private_video_payload(url, title=None, video_id=""):
-    """Return a UI-friendly unavailable item for private videos."""
-    raw_title = str(title or "")
-    display_title = raw_title if raw_title and "private video" not in raw_title.lower() else "私人影片"
-    return {
-        "type": "video",
-        "id": video_id,
-        "title": display_title,
-        "orig_title": raw_title or display_title,
-        "was_converted": False,
-        "url": url,
-        "duration": None,
-        "duration_str": "Unknown",
-        "category": None,
-        "uploader": "",
-        "thumbnail": "",
-        "lang": "other",
-        "is_private": True,
-        "downloadable": False,
-        "unavailable_reason": PRIVATE_VIDEO_MESSAGE,
-    }
 
 def get_cookie_opt():
     """Return cookiefile path if cookies.txt exists"""
@@ -150,11 +94,6 @@ def build_ydl_opts_base(extra=None):
         "quiet": True,
         "no_warnings": True,
         "remote_components": "ejs:github",
-        "retries": 3,
-        "extractor_retries": 3,
-        "fragment_retries": 3,
-        "sleep_interval_requests": 1,
-        "socket_timeout": 30,
     }
     cookie = get_cookie_opt()
     if cookie:
@@ -163,47 +102,401 @@ def build_ydl_opts_base(extra=None):
         opts.update(extra)
     return opts
 
+def format_playlist_item(e):
+    """Convert a yt-dlp or YouTube continuation entry to the frontend item shape."""
+    vid_id = e.get("id") or e.get("videoId") or ""
+    orig_title = e.get("title") or ""
+    is_private = (
+        e.get("availability") in ("private", "needs_auth") or
+        orig_title in ("[Private video]", "[Deleted video]", "") or
+        e.get("is_private") or
+        not vid_id
+    )
+    conv_title, was_conv = s2t_title(orig_title) if not is_private else (orig_title, False)
+    duration = e.get("duration")
+    raw_url = e.get("url") or e.get("webpage_url") or ""
+    item_url = raw_url if str(raw_url).startswith("http") else f"https://www.youtube.com/watch?v={vid_id}"
+    return {
+        "id": vid_id,
+        "title": conv_title if not is_private else "私人影片",
+        "orig_title": orig_title,
+        "was_converted": was_conv,
+        "url": item_url,
+        "duration": duration,
+        "duration_str": e.get("duration_str") or format_duration(duration),
+        "category": e.get("categories", [None])[0] if e.get("categories") else e.get("category"),
+        "uploader": e.get("uploader", ""),
+        "lang": "zh-CN" if was_conv else "other",
+        "is_private": is_private,
+    }
+
+def _extract_json_after(text, marker):
+    """Extract a balanced JSON object after a marker in YouTube HTML."""
+    pos = text.find(marker)
+    if pos < 0:
+        return None
+    start = text.find("{", pos + len(marker))
+    if start < 0:
+        return None
+
+    depth = 0
+    in_str = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start:i + 1])
+                except json.JSONDecodeError:
+                    return None
+    return None
+
+def _text_from_runs(obj):
+    if not obj:
+        return ""
+    if isinstance(obj, str):
+        return obj
+    if obj.get("simpleText"):
+        return obj["simpleText"]
+    return "".join(run.get("text", "") for run in obj.get("runs", []))
+
+def _iter_renderer_values(obj, key):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k == key:
+                yield v
+            else:
+                yield from _iter_renderer_values(v, key)
+    elif isinstance(obj, list):
+        for item in obj:
+            yield from _iter_renderer_values(item, key)
+
+def _entry_from_playlist_renderer(renderer):
+    video_id = renderer.get("videoId") or renderer.get("navigationEndpoint", {}).get("watchEndpoint", {}).get("videoId", "")
+    title = _text_from_runs(renderer.get("title"))
+    length_text = _text_from_runs(renderer.get("lengthText"))
+    duration = renderer.get("lengthSeconds")
+    try:
+        duration = int(duration) if duration is not None else None
+    except (TypeError, ValueError):
+        duration = None
+    uploader = _text_from_runs(renderer.get("shortBylineText")) or _text_from_runs(renderer.get("longBylineText"))
+    is_private = not video_id or "private" in title.lower() or "deleted" in title.lower()
+    return {
+        "id": video_id,
+        "title": title,
+        "url": f"https://www.youtube.com/watch?v={video_id}" if video_id else "",
+        "duration": duration,
+        "duration_str": length_text or format_duration(duration),
+        "uploader": uploader,
+        "is_private": is_private,
+    }
+
+def _duration_seconds_from_text(text):
+    if not text or ":" not in text:
+        return None
+    parts = text.split(":")
+    if not all(part.isdigit() for part in parts):
+        return None
+    total = 0
+    for part in parts:
+        total = total * 60 + int(part)
+    return total
+
+def _entry_from_lockup_view_model(view_model):
+    video_id = view_model.get("contentId") or ""
+    if not video_id:
+        for endpoint in _iter_renderer_values(view_model, "watchEndpoint"):
+            video_id = endpoint.get("videoId", "")
+            if video_id:
+                break
+
+    metadata = view_model.get("metadata", {}).get("lockupMetadataViewModel", {})
+    title = metadata.get("title", {}).get("content", "")
+    duration_str = ""
+    for badge in _iter_renderer_values(view_model, "thumbnailBadgeViewModel"):
+        text = badge.get("text")
+        if isinstance(text, str) and ":" in text:
+            duration_str = text
+            break
+
+    uploader = ""
+    content_meta = metadata.get("metadata", {}).get("contentMetadataViewModel", {})
+    for row in content_meta.get("metadataRows", []):
+        for part in row.get("metadataParts", []):
+            text = part.get("text", {}).get("content")
+            if text:
+                uploader = text
+                break
+        if uploader:
+            break
+
+    duration = _duration_seconds_from_text(duration_str)
+    is_private = not video_id or "private" in title.lower() or "deleted" in title.lower()
+    return {
+        "id": video_id,
+        "title": title,
+        "url": f"https://www.youtube.com/watch?v={video_id}" if video_id else "",
+        "duration": duration,
+        "duration_str": duration_str or format_duration(duration),
+        "uploader": uploader,
+        "is_private": is_private,
+    }
+
+def _find_continuation_token(data):
+    for command in _iter_renderer_values(data, "continuationCommand"):
+        if not isinstance(command, dict):
+            continue
+        token = command.get("token")
+        if token:
+            return token
+        token = command.get("innertubeCommand", {}).get("continuationCommand", {}).get("token")
+        if token:
+            return token
+    return None
+
+def _extract_declared_playlist_count(data):
+    count_re = re.compile(r"([\d,]+)\s*(?:部影片|videos?)", re.IGNORECASE)
+    for text_obj in _iter_renderer_values(data, "text"):
+        content = ""
+        if isinstance(text_obj, dict):
+            content = text_obj.get("content") or text_obj.get("simpleText") or _text_from_runs(text_obj)
+        elif isinstance(text_obj, str):
+            content = text_obj
+        match = count_re.search(content or "")
+        if match:
+            return int(match.group(1).replace(",", ""))
+    return None
+
+def _playlist_contents_from_response(data):
+    for renderer in _iter_renderer_values(data, "playlistVideoListRenderer"):
+        return renderer.get("contents", [])
+    for action in data.get("onResponseReceivedActions", []) if isinstance(data, dict) else []:
+        items = action.get("appendContinuationItemsAction", {}).get("continuationItems")
+        if items:
+            return items
+    for action in data.get("onResponseReceivedEndpoints", []) if isinstance(data, dict) else []:
+        items = action.get("appendContinuationItemsAction", {}).get("continuationItems")
+        if items:
+            return items
+    return []
+
+def _parse_playlist_contents(contents):
+    entries = []
+    continuation = None
+    for content in contents:
+        renderer = content.get("playlistVideoRenderer") or content.get("playlistPanelVideoRenderer")
+        if renderer:
+            entries.append(_entry_from_playlist_renderer(renderer))
+            continue
+        cont_renderer = content.get("continuationItemRenderer")
+        if cont_renderer:
+            continuation = (
+                cont_renderer.get("continuationEndpoint", {})
+                .get("continuationCommand", {})
+                .get("token")
+            )
+    return entries, continuation
+
+def fetch_youtube_playlist_continuation_entries(url, limit=9999):
+    """Best-effort YouTube playlist page walker for entries beyond yt-dlp's first 100."""
+    parsed = urllib.parse.urlparse(url)
+    playlist_id = urllib.parse.parse_qs(parsed.query).get("list", [""])[0]
+    if not playlist_id:
+        return [], None
+
+    jar = http.cookiejar.MozillaCookieJar()
+    handlers = []
+    if COOKIE_FILE.exists():
+        try:
+            jar.load(str(COOKIE_FILE), ignore_discard=True, ignore_expires=True)
+            handlers.append(urllib.request.HTTPCookieProcessor(jar))
+        except Exception:
+            pass
+    opener = urllib.request.build_opener(*handlers)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+    }
+
+    playlist_url = f"https://www.youtube.com/playlist?list={urllib.parse.quote(playlist_id)}"
+    req = urllib.request.Request(playlist_url, headers=headers)
+    with opener.open(req, timeout=30) as resp:
+        html = resp.read().decode("utf-8", errors="replace")
+
+    initial_data = _extract_json_after(html, "ytInitialData =") or _extract_json_after(html, "var ytInitialData =")
+    ytcfg = _extract_json_after(html, "ytcfg.set(") or {}
+    if not initial_data:
+        return [], None
+
+    contents = _playlist_contents_from_response(initial_data)
+    entries, continuation = _parse_playlist_contents(contents)
+    if not entries:
+        entries = [_entry_from_lockup_view_model(vm) for vm in _iter_renderer_values(initial_data, "lockupViewModel")]
+        entries = [entry for entry in entries if entry.get("id") or entry.get("title")]
+        continuation = _find_continuation_token(initial_data)
+    declared_count = _extract_declared_playlist_count(initial_data)
+    api_key_match = re.search(r'"INNERTUBE_API_KEY":"([^"]+)"', html)
+    api_key = ytcfg.get("INNERTUBE_API_KEY") or (api_key_match.group(1) if api_key_match else "")
+    if not api_key:
+        return entries[:limit], ""
+    client_version = ytcfg.get("INNERTUBE_CLIENT_VERSION") or "2.20240620.01.00"
+
+    while continuation and len(entries) < limit:
+        payload = {
+            "context": {
+                "client": {
+                    "clientName": "WEB",
+                    "clientVersion": client_version,
+                    "hl": "zh-TW",
+                    "gl": "TW",
+                }
+            },
+            "continuation": continuation,
+        }
+        body = json.dumps(payload).encode("utf-8")
+        endpoint = f"https://www.youtube.com/youtubei/v1/browse?key={urllib.parse.quote(api_key)}"
+        req = urllib.request.Request(endpoint, data=body, headers={
+            **headers,
+            "Content-Type": "application/json",
+            "Origin": "https://www.youtube.com",
+            "Referer": playlist_url,
+            "X-YouTube-Client-Name": "1",
+            "X-YouTube-Client-Version": client_version,
+        })
+        with opener.open(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+        page_entries, continuation = _parse_playlist_contents(_playlist_contents_from_response(data))
+        if not page_entries:
+            page_entries = [_entry_from_lockup_view_model(vm) for vm in _iter_renderer_values(data, "lockupViewModel")]
+            page_entries = [entry for entry in page_entries if entry.get("id") or entry.get("title")]
+        continuation = continuation or _find_continuation_token(data)
+        if not page_entries:
+            break
+        entries.extend(page_entries)
+
+    title = ""
+    for header in _iter_renderer_values(initial_data, "playlistHeaderRenderer"):
+        title = _text_from_runs(header.get("title"))
+        break
+    if not title:
+        for header in _iter_renderer_values(initial_data, "pageHeaderRenderer"):
+            title = header.get("pageTitle") or ""
+            if title:
+                break
+    unique_entries = []
+    seen_ids = set()
+    for entry in entries:
+        key = entry.get("id") or entry.get("url") or entry.get("title")
+        if key in seen_ids:
+            continue
+        seen_ids.add(key)
+        unique_entries.append(entry)
+    if declared_count and declared_count > len(unique_entries):
+        missing = declared_count - len(unique_entries)
+        for i in range(missing):
+            unique_entries.append({
+                "id": "",
+                "title": f"不可用影片 {i + 1}",
+                "url": "",
+                "duration": None,
+                "duration_str": "Unknown",
+                "uploader": "",
+                "is_private": True,
+            })
+    return unique_entries[:limit], title
+
+def complete_playlist_entries(url, ydl_entries):
+    """Use YouTube continuation pages when yt-dlp only returns the first page."""
+    try:
+        continuation_entries, continuation_title = fetch_youtube_playlist_continuation_entries(url)
+    except Exception as ex:
+        return ydl_entries, "", f"continuation failed: {ex}"
+
+    if len(continuation_entries) <= len(ydl_entries):
+        return ydl_entries, continuation_title, ""
+
+    by_id = {e.get("id"): e for e in ydl_entries if e and e.get("id")}
+    merged = []
+    seen_ids = set()
+    for entry in continuation_entries:
+        ydl_entry = by_id.get(entry.get("id"))
+        merged_entry = {**entry, **ydl_entry} if ydl_entry else entry
+        merged.append(merged_entry)
+        if merged_entry.get("id"):
+            seen_ids.add(merged_entry["id"])
+    for entry in ydl_entries:
+        entry_id = entry.get("id")
+        if entry_id and entry_id not in seen_ids:
+            merged.append(entry)
+            seen_ids.add(entry_id)
+    return merged, continuation_title, ""
+
 def fetch_info(url):
     """Fetch video/playlist info without downloading"""
     ydl_opts = build_ydl_opts_base({
-        "extract_flat": True,
+        "extract_flat": "in_playlist",
         "skip_download": True,
+        "lazy_playlist": False,       # Force fetch all pages
+        "ignoreerrors": True,         # Skip unavailable videos
     })
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             if info is None:
-                return {"error": "無法取得影片資訊"}
+                return None
 
             if info.get("_type") == "playlist":
+                entries = [e for e in (info.get("entries", []) or []) if e]
+                entries, continuation_title, _ = complete_playlist_entries(url, entries)
+                items = [format_playlist_item(e) for e in entries]
+                return {
+                    "type": "playlist",
+                    "title": info.get("title") or continuation_title or "Playlist",
+                    "uploader": info.get("uploader", ""),
+                    "count": len(items),
+                    "items": items,
+                }
                 entries = info.get("entries", [])
                 items = []
                 for e in entries:
                     if e:
                         duration = e.get("duration")
-                        orig_title = e.get("title", "Unknown")
-                        url_value = e.get("url") or e.get("webpage_url") or f"https://www.youtube.com/watch?v={e.get('id','')}"
-                        if is_private_video_info(e):
-                            item = private_video_payload(url_value, orig_title, e.get("id", ""))
-                            item["duration"] = duration
-                            item["duration_str"] = format_duration(duration)
-                            items.append(item)
-                            continue
-
-                        conv_title, was_conv = s2t_title(orig_title)
+                        orig_title = e.get("title") or ""
+                        # Detect private video
+                        is_private = (
+                            e.get("availability") in ("private", "needs_auth") or
+                            orig_title in ("[Private video]", "[Deleted video]", "") or
+                            e.get("id") is None
+                        )
+                        conv_title, was_conv = s2t_title(orig_title) if not is_private else (orig_title, False)
                         items.append({
                             "id": e.get("id", ""),
-                            "title": conv_title,
+                            "title": conv_title if not is_private else "🔒 私人影片",
                             "orig_title": orig_title,
                             "was_converted": was_conv,
-                            "url": url_value,
+                            "url": e.get("url") or e.get("webpage_url") or f"https://www.youtube.com/watch?v={e.get('id','')}",
                             "duration": duration,
                             "duration_str": format_duration(duration),
                             "category": e.get("categories", [None])[0] if e.get("categories") else None,
                             "uploader": e.get("uploader", ""),
                             "lang": "zh-CN" if was_conv else "other",
-                            "downloadable": True,
-                            "is_private": False,
+                            "is_private": is_private,
                         })
                 return {
                     "type": "playlist",
@@ -215,12 +508,6 @@ def fetch_info(url):
             else:
                 duration = info.get("duration")
                 orig_title = info.get("title", "Unknown")
-                if is_private_video_info(info):
-                    payload = private_video_payload(url, orig_title, info.get("id", ""))
-                    payload["duration"] = duration
-                    payload["duration_str"] = format_duration(duration)
-                    return payload
-
                 conv_title, was_conv = s2t_title(orig_title)
                 return {
                     "type": "video",
@@ -234,14 +521,9 @@ def fetch_info(url):
                     "uploader": info.get("uploader", ""),
                     "thumbnail": info.get("thumbnail", ""),
                     "lang": "zh-CN" if was_conv else "other",
-                    "downloadable": True,
-                    "is_private": False,
                 }
     except Exception as e:
-        message = clean_error_message(e)
-        if is_private_video_info({}, message):
-            return private_video_payload(url)
-        return {"error": message}
+        return {"error": str(e)}
 
 def format_duration(seconds):
     if not seconds:
@@ -316,7 +598,7 @@ def download_worker(job_id, items, media_type, extension, output_dir, title_hint
             job["log"].append({"url": url, "title": custom_title or url, "status": "success"})
         except Exception as e:
             job["failed"] += 1
-            job["log"].append({"url": url, "title": custom_title or url, "status": "error", "message": clean_error_message(e)})
+            job["log"].append({"url": url, "title": custom_title or url, "status": "error", "message": str(e)})
 
     job["status"] = "done" if not job.get("cancelled") else "cancelled"
     job["current_percent"] = 100
@@ -338,9 +620,85 @@ def api_convert_titles():
     converted = [_s2t.convert(t) if isinstance(t, str) else (t or '') for t in titles]
     return jsonify({"converted": converted})
 
+@app.route("/api/fetch-playlist-stream", methods=["POST"])
+def api_fetch_playlist_stream():
+    """Fetch entire playlist and stream results to frontend"""
+    data = request.json
+    url = data.get("url", "").strip()
+    if not url:
+        return jsonify({"error": "No URL"}), 400
+
+    def generate():
+        total_fetched = 0
+        yield f"data: {json.dumps({'type': 'header', 'title': '載入中...', 'uploader': '', 'total': 0})}\n\n"
+
+        ydl_opts = build_ydl_opts_base({
+            "extract_flat": "in_playlist",
+            "skip_download": True,
+            "lazy_playlist": False,
+            "ignoreerrors": True,
+            "quiet": True,
+            "playlist_items": "1-9999",
+        })
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+
+            if info is None or info.get("_type") != "playlist":
+                yield f"data: {json.dumps({'error': 'Not a playlist URL'})}\n\n"
+                return
+
+            entries = [e for e in (info.get("entries") or []) if e]
+            entries, continuation_title, continuation_warning = complete_playlist_entries(url, entries)
+            total = len(entries)
+
+            yield f"data: {json.dumps({'type': 'meta', 'title': info.get('title') or continuation_title or 'Playlist', 'uploader': info.get('uploader',''), 'total': total, 'warning': continuation_warning})}\n\n"
+
+            CHUNK = 20
+            for start in range(0, total, CHUNK):
+                chunk_items = []
+                for e in entries[start:start+CHUNK]:
+                    chunk_items.append(format_playlist_item(e))
+                    total_fetched += 1
+                    continue
+                    vid_id = e.get("id", "")
+                    orig_title = e.get("title") or ""
+                    is_private = (
+                        e.get("availability") in ("private", "needs_auth") or
+                        orig_title in ("[Private video]", "[Deleted video]", "") or
+                        not vid_id
+                    )
+                    conv_title, was_conv = s2t_title(orig_title) if not is_private else (orig_title, False)
+                    duration = e.get("duration")
+                    chunk_items.append({
+                        "id": vid_id,
+                        "title": conv_title if not is_private else "🔒 私人影片",
+                        "orig_title": orig_title,
+                        "was_converted": was_conv,
+                        "url": e.get("url") or e.get("webpage_url") or f"https://www.youtube.com/watch?v={vid_id}",
+                        "duration": duration,
+                        "duration_str": format_duration(duration),
+                        "category": e.get("categories", [None])[0] if e.get("categories") else None,
+                        "uploader": e.get("uploader", ""),
+                        "lang": "zh-CN" if was_conv else "other",
+                        "is_private": is_private,
+                    })
+                    total_fetched += 1
+
+                yield f"data: {json.dumps({'type': 'chunk', 'items': chunk_items, 'loaded': total_fetched, 'total': total}, ensure_ascii=False)}\n\n"
+
+        except Exception as ex:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(ex)})}\n\n"
+
+        yield f"data: {json.dumps({'type': 'done', 'total': total_fetched})}\n\n"
+
+    return app.response_class(generate(), mimetype="text/event-stream",
+                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
 @app.route("/api/fetch-info", methods=["POST"])
 def api_fetch_info():
-    data = request.json or {}
+    data = request.json
     url = data.get("url", "").strip()
     if not url:
         return jsonify({"error": "No URL provided"}), 400
@@ -376,32 +734,19 @@ def api_parse_import():
 
 @app.route("/api/start-download", methods=["POST"])
 def api_start_download():
-    data = request.json or {}
+    data = request.json
     # Accept either old format {urls:[]} or new format {items:[{url, custom_title}]}
     raw_items = data.get("items", [])
-    had_input = bool(raw_items or data.get("urls", []))
     if not raw_items:
         # fallback: old format
         raw_items = [{"url": u, "custom_title": ""} for u in data.get("urls", [])]
-    normalized_items = []
-    for item in raw_items:
-        if isinstance(item, str):
-            item = {"url": item, "custom_title": ""}
-        if not isinstance(item, dict):
-            continue
-        if item.get("is_private") or item.get("downloadable") is False:
-            continue
-        if item.get("url"):
-            normalized_items.append(item)
-    raw_items = normalized_items
-
     media_type = data.get("media_type", "video")
     extension = data.get("extension", "mp4")
     output_dir = data.get("output_dir", "")
     title_hint = data.get("title_hint", "downloads")
 
     if not raw_items:
-        return jsonify({"error": PRIVATE_VIDEO_MESSAGE if had_input else "No URLs"}), 400
+        return jsonify({"error": "No URLs"}), 400
 
     job_id = str(uuid.uuid4())
     download_jobs[job_id] = {
