@@ -4,7 +4,7 @@
 a = Analysis(
     ['launcher.py'],
     pathex=[],
-    binaries=[('C:\\Users\\hans0\\Desktop\\Code\\yt_downloader\\bin\\ffmpeg.exe', '.'), ('C:\\Users\\hans0\\Desktop\\Code\\yt_downloader\\bin\\ffprobe.exe', '.')],
+    binaries=[('D:\\self\\yt_downloader\\bin\\ffmpeg.exe', '.'), ('D:\\self\\yt_downloader\\bin\\ffprobe.exe', '.')],
     datas=[('templates', 'templates')],
     hiddenimports=[],
     hookspath=[],
