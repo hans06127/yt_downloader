@@ -14,9 +14,7 @@ env/
 # App generated files
 cookies.txt
 downloads/
-
-# Local frontend workspace
-frontend/
+.logs/
 
 # PyInstaller output
 dist/

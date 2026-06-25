@@ -1,0 +1,41 @@
+{
+  "name": "frontend",
+  "version": "0.2.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --webpack",
+    "dev:3001": "next dev --webpack --port 3001",
+    "build": "next build --webpack",
+    "build:export": "cross-env STATIC_EXPORT=true NEXT_PUBLIC_USE_MOCK=false next build --webpack",
+    "start": "next start",
+    "lint": "eslint",
+    "test:smoke": "node scripts/browser-smoke.mjs"
+  },
+  "dependencies": {
+    "@ant-design/icons": "^6.2.5",
+    "@tanstack/react-query": "^5.101.0",
+    "antd": "^6.4.5",
+    "axios": "^1.18.1",
+    "msw": "^2.14.6",
+    "next": "16.2.9",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "sass": "^1.101.0",
+    "styled-components": "^6.4.2",
+    "zustand": "^5.0.14"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "cross-env": "^10.1.0",
+    "eslint": "^9",
+    "eslint-config-next": "16.2.9",
+    "typescript": "^5"
+  },
+  "msw": {
+    "workerDirectory": [
+      "public"
+    ]
+  }
+}

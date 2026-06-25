@@ -4,12 +4,17 @@ import re
 import threading
 import uuid
 import datetime
+import logging
+import multiprocessing
+import queue
+import time
 import http.cookiejar
 import urllib.parse
 import urllib.request
-from flask import Flask, render_template, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 import yt_dlp
+from yt_dlp.utils import download_range_func
 import openpyxl
 import opencc
 from pathlib import Path
@@ -32,14 +37,37 @@ def s2t_title(text):
     was_converted = converted != text
     return converted, was_converted
 
-app = Flask(__name__)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("yt_downloader")
+
+APP_DIR = Path(__file__).resolve().parent
+FRONTEND_DIST = APP_DIR / "frontend" / "out"
+VERSION_FILE = APP_DIR / "VERSION"
+
+
+def read_app_version():
+    try:
+        return VERSION_FILE.read_text(encoding="utf-8").strip() or "dev"
+    except OSError:
+        return "dev"
+
+
+APP_VERSION = read_app_version()
+
+app = Flask(__name__, static_folder=None)
 CORS(app)
 
 # Store download jobs
 download_jobs = {}
+download_runtimes = {}
+download_jobs_lock = threading.RLock()
 
 # Cookie file path
-COOKIE_FILE = Path(__file__).parent / "cookies.txt"
+COOKIE_FILE = APP_DIR / "cookies.txt"
 
 def get_cookie_opt():
     """Return cookiefile path if cookies.txt exists"""
@@ -94,6 +122,11 @@ def build_ydl_opts_base(extra=None):
         "quiet": True,
         "no_warnings": True,
         "remote_components": "ejs:github",
+        "socket_timeout": 20,
+        "retries": 3,
+        "fragment_retries": 3,
+        "extractor_retries": 3,
+        "file_access_retries": 3,
     }
     cookie = get_cookie_opt()
     if cookie:
@@ -536,81 +569,274 @@ def format_duration(seconds):
         return f"{h}:{m:02d}:{s:02d}"
     return f"{m}:{s:02d}"
 
+def download_item_process(event_queue, item, media_type, extension, output_dir):
+    """Download one item in a child process so the parent can terminate it."""
+    url = item["url"]
+    custom_title = item.get("custom_title", "").strip() or None
+    segments = item.get("segments") or []
+    last_progress = {"percent": -1, "time": 0.0}
+
+    if custom_title:
+        safe = "".join(c for c in custom_title if c not in r'\/:*?"<>|').strip()
+        outtmpl = os.path.join(output_dir, f"{safe}.%(ext)s")
+    else:
+        outtmpl = os.path.join(output_dir, "%(title)s.%(ext)s")
+
+    def progress_hook(data):
+        if data["status"] == "downloading":
+            downloaded = data.get("downloaded_bytes", 0)
+            total = data.get("total_bytes") or data.get("total_bytes_estimate", 0)
+            percent = round((downloaded / total * 100) if total else 0, 1)
+            now = time.monotonic()
+            if percent >= last_progress["percent"] + 1 or now - last_progress["time"] >= 1:
+                last_progress.update(percent=percent, time=now)
+                event_queue.put({
+                    "type": "progress",
+                    "percent": percent,
+                    "filename": data.get("filename", ""),
+                })
+        elif data["status"] == "finished":
+            event_queue.put({
+                "type": "progress",
+                "percent": 100,
+                "filename": data.get("filename", ""),
+            })
+
+    ydl_opts = build_ydl_opts_base({
+        "format": get_format_string(media_type, extension),
+        "outtmpl": outtmpl,
+        "progress_hooks": [progress_hook],
+        "postprocessors": get_postprocessors(media_type, extension),
+    })
+    if segments:
+        segment = segments[0]
+        ydl_opts["download_ranges"] = download_range_func(
+            None,
+            [(segment["start"], segment["end"])],
+        )
+        ydl_opts["force_keyframes_at_cuts"] = True
+    if media_type == "video" and extension in ["mkv", "avi", "mov"]:
+        ydl_opts["merge_output_format"] = extension
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+        event_queue.put({"type": "result", "status": "success"})
+    except BaseException as error:
+        event_queue.put({
+            "type": "result",
+            "status": "error",
+            "message": str(error),
+        })
+
+
+def terminate_download_process(job_id):
+    """Terminate the active child process for a job, if one exists."""
+    with download_jobs_lock:
+        runtime = download_runtimes.get(job_id)
+        process = runtime.get("process") if runtime else None
+
+    if not process or not process.is_alive():
+        return False
+
+    logger.warning("[job:%s] Terminating active download process tree", job_id)
+    if os.name == "nt" and process.pid:
+        import subprocess
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+    else:
+        process.terminate()
+    process.join(timeout=5)
+    if process.is_alive() and hasattr(process, "kill"):
+        process.kill()
+        process.join(timeout=2)
+    return True
+
+
 def download_worker(job_id, items, media_type, extension, output_dir, title_hint):
-    """Background download worker. items = list of {url, custom_title}"""
-    job = download_jobs[job_id]
-    job["status"] = "running"
-    job["total"] = len(items)
-    job["completed"] = 0
-    job["failed"] = 0
-    job["log"] = []
+    """Coordinate a job and run each yt-dlp item in a terminable child process."""
+    with download_jobs_lock:
+        job = download_jobs[job_id]
+        job.update({
+            "status": "running",
+            "total": len(items),
+            "completed": 0,
+            "failed": 0,
+            "log": [],
+            "started_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        })
 
     if not output_dir:
         output_dir = get_default_output_dir(title_hint)
     else:
         Path(output_dir).mkdir(parents=True, exist_ok=True)
 
-    job["output_dir"] = output_dir
+    with download_jobs_lock:
+        job["output_dir"] = output_dir
 
-    def progress_hook(d):
-        if d["status"] == "downloading":
-            downloaded = d.get("downloaded_bytes", 0)
-            total = d.get("total_bytes") or d.get("total_bytes_estimate", 0)
-            percent = (downloaded / total * 100) if total else 0
-            job["current_percent"] = round(percent, 1)
-            job["current_file"] = d.get("filename", "")
-        elif d["status"] == "finished":
-            job["current_percent"] = 100
+    logger.info(
+        "[job:%s] Started: %s item(s), type=%s, extension=%s, output=%s",
+        job_id,
+        len(items),
+        media_type,
+        extension,
+        output_dir,
+    )
 
-    fmt = get_format_string(media_type, extension)
-    postprocessors = get_postprocessors(media_type, extension)
+    context = multiprocessing.get_context("spawn")
 
-    for i, item in enumerate(items):
-        if job.get("cancelled"):
-            break
-        url = item["url"]
-        custom_title = item.get("custom_title", "").strip() or None
-        job["current_index"] = i + 1
-        job["current_url"] = url
-        job["current_percent"] = 0
+    try:
+        for index, item in enumerate(items):
+            with download_jobs_lock:
+                if job.get("cancelled"):
+                    break
+                url = item["url"]
+                custom_title = item.get("custom_title", "").strip()
+                job.update({
+                    "current_index": index + 1,
+                    "current_url": url,
+                    "current_percent": 0,
+                    "current_file": "",
+                })
 
-        # Use custom title if provided, else use yt-dlp default %(title)s
-        if custom_title:
-            # Sanitize filename
-            safe = "".join(c for c in custom_title if c not in r'\/:*?"<>|').strip()
-            outtmpl = os.path.join(output_dir, f"{safe}.%(ext)s")
+            logger.info(
+                "[job:%s] Downloading %s/%s: %s",
+                job_id,
+                index + 1,
+                len(items),
+                url,
+            )
+
+            event_queue = context.Queue()
+            process = context.Process(
+                target=download_item_process,
+                args=(event_queue, item, media_type, extension, output_dir),
+                daemon=True,
+            )
+            with download_jobs_lock:
+                download_runtimes[job_id]["process"] = process
+
+            process.start()
+            result = None
+            last_logged_bucket = -1
+
+            while process.is_alive():
+                with download_jobs_lock:
+                    cancelled = job.get("cancelled", False)
+                if cancelled:
+                    terminate_download_process(job_id)
+                    break
+
+                try:
+                    event = event_queue.get(timeout=0.25)
+                except queue.Empty:
+                    continue
+
+                if event.get("type") == "progress":
+                    percent = float(event.get("percent", 0))
+                    with download_jobs_lock:
+                        job["current_percent"] = percent
+                        job["current_file"] = event.get("filename", "")
+                    bucket = int(percent // 10)
+                    if bucket > last_logged_bucket:
+                        last_logged_bucket = bucket
+                        logger.info(
+                            "[job:%s] Progress %s/%s: %.1f%%",
+                            job_id,
+                            index + 1,
+                            len(items),
+                            percent,
+                        )
+                elif event.get("type") == "result":
+                    result = event
+
+            process.join(timeout=2)
+            while True:
+                try:
+                    event = event_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if event.get("type") == "result":
+                    result = event
+                elif event.get("type") == "progress":
+                    with download_jobs_lock:
+                        job["current_percent"] = float(event.get("percent", 0))
+                        job["current_file"] = event.get("filename", "")
+
+            event_queue.close()
+            with download_jobs_lock:
+                download_runtimes[job_id]["process"] = None
+                cancelled = job.get("cancelled", False)
+
+            if cancelled:
+                logger.warning("[job:%s] Cancelled while processing %s", job_id, url)
+                break
+
+            title = custom_title or url
+            if result and result.get("status") == "success":
+                with download_jobs_lock:
+                    job["completed"] += 1
+                    job["current_percent"] = 100
+                    job["log"].append({
+                        "url": url,
+                        "title": title,
+                        "custom_title": custom_title,
+                        "segments": item.get("segments") or [],
+                        "status": "success",
+                    })
+                logger.info("[job:%s] Completed %s/%s: %s", job_id, index + 1, len(items), title)
+            else:
+                message = (result or {}).get("message") or f"Download process exited with code {process.exitcode}"
+                with download_jobs_lock:
+                    job["failed"] += 1
+                    job["log"].append({
+                        "url": url,
+                        "title": title,
+                        "custom_title": custom_title,
+                        "segments": item.get("segments") or [],
+                        "status": "error",
+                        "message": message,
+                    })
+                logger.error("[job:%s] Failed %s/%s: %s - %s", job_id, index + 1, len(items), title, message)
+    except BaseException:
+        logger.exception("[job:%s] Worker crashed", job_id)
+        with download_jobs_lock:
+            job["status"] = "error"
+            job["error"] = "Download worker crashed. Check backend console."
+    finally:
+        terminate_download_process(job_id)
+        with download_jobs_lock:
+            if job.get("status") != "error":
+                job["status"] = "cancelled" if job.get("cancelled") else "done"
+            if job["status"] == "done":
+                job["current_percent"] = 100
+            job["finished_at"] = datetime.datetime.now().isoformat(timespec="seconds")
+            download_runtimes.pop(job_id, None)
+
+        if job["status"] == "cancelled":
+            logger.warning("[job:%s] Job cancelled", job_id)
+        elif job["status"] == "error" or job.get("failed"):
+            logger.error(
+                "[job:%s] Job finished with errors: completed=%s failed=%s",
+                job_id,
+                job.get("completed", 0),
+                job.get("failed", 0),
+            )
         else:
-            outtmpl = os.path.join(output_dir, "%(title)s.%(ext)s")
-
-        ydl_opts = build_ydl_opts_base({
-            "format": fmt,
-            "outtmpl": outtmpl,
-            "progress_hooks": [progress_hook],
-            "postprocessors": postprocessors,
-        })
-        if media_type == "video" and extension in ["mkv", "avi", "mov"]:
-            ydl_opts["merge_output_format"] = extension
-
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
-            job["completed"] += 1
-            job["log"].append({"url": url, "title": custom_title or url, "status": "success"})
-        except Exception as e:
-            job["failed"] += 1
-            job["log"].append({"url": url, "title": custom_title or url, "status": "error", "message": str(e)})
-
-    job["status"] = "done" if not job.get("cancelled") else "cancelled"
-    job["current_percent"] = 100
-
-
-@app.route("/")
-def index():
-    return render_template("index.html")
+            logger.info("[job:%s] Job completed successfully", job_id)
 
 @app.route("/api/default-dir")
 def api_default_dir():
     return jsonify({"path": str(get_system_downloads_dir())})
+
+
+@app.route("/api/version")
+def api_version():
+    return jsonify({"version": APP_VERSION})
 
 @app.route("/api/convert-titles", methods=["POST"])
 def api_convert_titles():
@@ -629,6 +855,7 @@ def api_fetch_playlist_stream():
         return jsonify({"error": "No URL"}), 400
 
     def generate():
+        logger.info("[playlist] Query started: %s", url)
         total_fetched = 0
         yield f"data: {json.dumps({'type': 'header', 'title': '載入中...', 'uploader': '', 'total': 0})}\n\n"
 
@@ -646,12 +873,14 @@ def api_fetch_playlist_stream():
                 info = ydl.extract_info(url, download=False)
 
             if info is None or info.get("_type") != "playlist":
+                logger.error("[playlist] Not a playlist: %s", url)
                 yield f"data: {json.dumps({'error': 'Not a playlist URL'})}\n\n"
                 return
 
             entries = [e for e in (info.get("entries") or []) if e]
             entries, continuation_title, continuation_warning = complete_playlist_entries(url, entries)
             total = len(entries)
+            logger.info("[playlist] Query succeeded: %s item(s), %s", total, url)
 
             yield f"data: {json.dumps({'type': 'meta', 'title': info.get('title') or continuation_title or 'Playlist', 'uploader': info.get('uploader',''), 'total': total, 'warning': continuation_warning})}\n\n"
 
@@ -689,6 +918,7 @@ def api_fetch_playlist_stream():
                 yield f"data: {json.dumps({'type': 'chunk', 'items': chunk_items, 'loaded': total_fetched, 'total': total}, ensure_ascii=False)}\n\n"
 
         except Exception as ex:
+            logger.exception("[playlist] Query failed: %s", url)
             yield f"data: {json.dumps({'type': 'error', 'message': str(ex)})}\n\n"
 
         yield f"data: {json.dumps({'type': 'done', 'total': total_fetched})}\n\n"
@@ -702,7 +932,12 @@ def api_fetch_info():
     url = data.get("url", "").strip()
     if not url:
         return jsonify({"error": "No URL provided"}), 400
+    logger.info("[query] Fetch info started: %s", url)
     info = fetch_info(url)
+    if info and not info.get("error"):
+        logger.info("[query] Fetch info succeeded: type=%s title=%s", info.get("type"), info.get("title"))
+    else:
+        logger.error("[query] Fetch info failed: %s - %s", url, (info or {}).get("error", "No result"))
     return jsonify(info)
 
 @app.route("/api/parse-import", methods=["POST"])
@@ -730,6 +965,7 @@ def api_parse_import():
                     urls.append(cell.strip())
     else:
         return jsonify({"error": "Unsupported file type"}), 400
+    logger.info("[import] Parsed %s URL(s) from %s", len(urls), f.filename)
     return jsonify({"urls": urls})
 
 @app.route("/api/start-download", methods=["POST"])
@@ -748,41 +984,142 @@ def api_start_download():
     if not raw_items:
         return jsonify({"error": "No URLs"}), 400
 
+    try:
+        raw_items = expand_download_segments(raw_items)
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+
     job_id = str(uuid.uuid4())
-    download_jobs[job_id] = {
-        "status": "queued",
-        "total": len(raw_items),
-        "completed": 0,
-        "failed": 0,
-        "current_index": 0,
-        "current_url": "",
-        "current_percent": 0,
-        "output_dir": output_dir,
-        "log": [],
-        "cancelled": False,
-    }
+    with download_jobs_lock:
+        download_jobs[job_id] = {
+            "status": "queued",
+            "total": len(raw_items),
+            "completed": 0,
+            "failed": 0,
+            "current_index": 0,
+            "current_url": "",
+            "current_percent": 0,
+            "current_file": "",
+            "output_dir": output_dir,
+            "log": [],
+            "cancelled": False,
+            "created_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        }
+        download_runtimes[job_id] = {"process": None, "thread": None}
 
     t = threading.Thread(
         target=download_worker,
         args=(job_id, raw_items, media_type, extension, output_dir, title_hint),
         daemon=True,
     )
+    with download_jobs_lock:
+        download_runtimes[job_id]["thread"] = t
     t.start()
+    logger.info("[job:%s] Queued %s item(s)", job_id, len(raw_items))
     return jsonify({"job_id": job_id})
+
+
+def expand_download_segments(raw_items):
+    """Validate ranges and expand each requested segment into its own download item."""
+    expanded = []
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict) or not str(raw_item.get("url", "")).strip():
+            raise ValueError("Each download item must contain a URL")
+
+        item = {
+            "url": str(raw_item["url"]).strip(),
+            "custom_title": str(raw_item.get("custom_title", "")).strip(),
+            "segments": [],
+        }
+        segments = raw_item.get("segments") or []
+        if not segments:
+            expanded.append(item)
+            continue
+        if not isinstance(segments, list) or len(segments) > 20:
+            raise ValueError("Each video supports at most 20 download segments")
+
+        normalized = []
+        for segment in segments:
+            if not isinstance(segment, dict):
+                raise ValueError("Invalid download segment")
+            try:
+                start = float(segment["start"])
+                end = float(segment["end"])
+            except (KeyError, TypeError, ValueError):
+                raise ValueError("Segment start and end must be numbers") from None
+            if start < 0 or end <= start:
+                raise ValueError("Segment end must be greater than start")
+            normalized.append({"start": start, "end": end})
+
+        normalized.sort(key=lambda segment: segment["start"])
+        for index, segment in enumerate(normalized):
+            if index and segment["start"] < normalized[index - 1]["end"]:
+                raise ValueError("Download segments cannot overlap")
+
+        base_title = item["custom_title"] or "download"
+        for index, segment in enumerate(normalized, start=1):
+            expanded.append({
+                **item,
+                "custom_title": (
+                    f"{base_title} - 片段 {index:02d} "
+                    f"({format_segment_time(segment['start'])}-{format_segment_time(segment['end'])})"
+                ),
+                "segments": [segment],
+            })
+
+    if len(expanded) > 1000:
+        raise ValueError("A download job supports at most 1000 files after segment expansion")
+    return expanded
+
+
+def format_segment_time(seconds):
+    total = max(0, int(seconds))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours:02d}-{minutes:02d}-{secs:02d}"
+    return f"{minutes:02d}-{secs:02d}"
 
 @app.route("/api/job-status/<job_id>")
 def api_job_status(job_id):
-    job = download_jobs.get(job_id)
-    if not job:
-        return jsonify({"error": "Job not found"}), 404
-    return jsonify(job)
+    with download_jobs_lock:
+        job = download_jobs.get(job_id)
+        if not job:
+            return jsonify({"error": "Job not found"}), 404
+        snapshot = dict(job)
+        snapshot["log"] = [dict(entry) for entry in job.get("log", [])]
+    return jsonify(snapshot)
 
 @app.route("/api/cancel-job/<job_id>", methods=["POST"])
 def api_cancel_job(job_id):
-    job = download_jobs.get(job_id)
-    if job:
+    with download_jobs_lock:
+        job = download_jobs.get(job_id)
+        if not job:
+            return jsonify({"error": "Job not found"}), 404
+        if job.get("status") in ("done", "cancelled", "error"):
+            return jsonify({"ok": True, "status": job.get("status")})
         job["cancelled"] = True
-    return jsonify({"ok": True})
+        job["status"] = "cancelling"
+    terminated = terminate_download_process(job_id)
+    logger.warning("[job:%s] Cancel requested, process_terminated=%s", job_id, terminated)
+    return jsonify({"ok": True, "status": "cancelling", "terminated": terminated})
+
+
+@app.route("/api/cancel-all-jobs", methods=["POST"])
+def api_cancel_all_jobs():
+    with download_jobs_lock:
+        active_job_ids = [
+            job_id
+            for job_id, job in download_jobs.items()
+            if job.get("status") not in ("done", "cancelled", "error")
+        ]
+        for job_id in active_job_ids:
+            download_jobs[job_id]["cancelled"] = True
+            download_jobs[job_id]["status"] = "cancelling"
+
+    terminated = sum(1 for job_id in active_job_ids if terminate_download_process(job_id))
+    logger.warning("[jobs] Cancel all requested: jobs=%s terminated=%s", len(active_job_ids), terminated)
+    return jsonify({"ok": True, "jobs": len(active_job_ids), "terminated": terminated})
 
 @app.route("/api/cookie-status")
 def api_cookie_status():
@@ -803,12 +1140,14 @@ def api_upload_cookie():
     if "youtube.com" not in content and "HTTP Cookie" not in content and "# Netscape" not in content:
         return jsonify({"error": "檔案格式不正確，請確認是 YouTube cookies.txt"}), 400
     COOKIE_FILE.write_text(content, encoding="utf-8")
+    logger.info("[cookie] Cookie file updated")
     return jsonify({"ok": True})
 
 @app.route("/api/delete-cookie", methods=["POST"])
 def api_delete_cookie():
     if COOKIE_FILE.exists():
         COOKIE_FILE.unlink()
+    logger.info("[cookie] Cookie file deleted")
     return jsonify({"ok": True})
 
 @app.route("/api/open-folder", methods=["POST"])
@@ -826,5 +1165,47 @@ def api_open_folder():
             subprocess.Popen(["xdg-open", folder])
     return jsonify({"ok": True})
 
+
+def resolve_frontend_file(path):
+    """Resolve an exported Next.js route or asset inside FRONTEND_DIST."""
+    clean_path = path.strip("/")
+    candidates = []
+    if clean_path:
+        candidates.extend([
+            FRONTEND_DIST / clean_path,
+            FRONTEND_DIST / clean_path / "index.html",
+            FRONTEND_DIST / f"{clean_path}.html",
+        ])
+    else:
+        candidates.append(FRONTEND_DIST / "index.html")
+
+    frontend_root = FRONTEND_DIST.resolve()
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if frontend_root not in resolved.parents and resolved != frontend_root:
+            continue
+        if resolved.is_file():
+            return resolved
+    return None
+
+
+@app.route("/", defaults={"path": ""})
+@app.route("/<path:path>")
+def serve_frontend(path):
+    target = resolve_frontend_file(path)
+    if not target:
+        logger.error("[frontend] Exported file not found: %s", path or "/")
+        return jsonify({
+            "error": "Frontend build not found",
+            "hint": "Run frontend static export before starting the packaged application.",
+        }), 503
+    return send_from_directory(target.parent, target.name)
+
+
 if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+    multiprocessing.freeze_support()
+    logger.info("Backend listening on http://localhost:5000")
+    app.run(debug=True, use_reloader=False, threaded=True, port=5000)
