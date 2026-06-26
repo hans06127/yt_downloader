@@ -35,7 +35,7 @@ class BackendTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["version"], app.APP_VERSION)
-        self.assertEqual(app.APP_VERSION, "0.2.0")
+        self.assertEqual(app.APP_VERSION, app.VERSION_FILE.read_text(encoding="utf-8").strip())
 
     def test_cancel_job_terminates_active_process(self):
         context = multiprocessing.get_context("spawn")

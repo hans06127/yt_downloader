@@ -1,2 +1,3 @@
 # Normalize line endings in tracked text files.
 * text=auto
+.githooks/* text eol=lf

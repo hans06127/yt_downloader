@@ -39,6 +39,11 @@ pushd "%~dp0frontend"
 call npm ci --no-audit --no-fund
 if errorlevel 1 goto :frontend_install_failed
 
+if exist "%~dp0frontend\out" (
+    echo Removing old frontend export...
+    rmdir /s /q "%~dp0frontend\out"
+)
+
 call npm run build:export
 if errorlevel 1 goto :frontend_export_failed
 popd
@@ -87,9 +92,20 @@ if exist "%~dp0bin\deno.exe" (
 
 echo.
 echo [5/5] Building...
+
+if exist "%~dp0dist\YT_Downloader" (
+    echo Removing old packaged app...
+    rmdir /s /q "%~dp0dist\YT_Downloader"
+)
+
+if exist "%~dp0build\YT_Downloader" (
+    echo Removing old PyInstaller work folder...
+    rmdir /s /q "%~dp0build\YT_Downloader"
+)
+
 python -m PyInstaller --noconfirm --onedir --console --specpath build ^
-  --add-data "frontend\out;frontend_out" ^
-  --add-data "VERSION;." ^
+  --add-data "%~dp0frontend\out;frontend_out" ^
+  --add-data "%~dp0VERSION;." ^
   %FFMPEG_ARGS% ^
   %DENO_ARGS% ^
   launcher.py --name YT_Downloader
