@@ -121,8 +121,8 @@ function VideoRow({
       {item.category ? <span className="video-cat">{item.category}</span> : null}
       {item.lang !== "other" ? <span className={langClass}>{item.lang === "zh-TW" ? "繁" : "簡"}</span> : null}
       {item._duplicate ? <span className="dup-badge">重複</span> : null}
-      <MediaTools item={item} mediaType={mediaType} onSegmentsChange={onSegmentsChange} />
       <span className="video-dur">{item.duration_str}</span>
+      <MediaTools item={item} mediaType={mediaType} onSegmentsChange={onSegmentsChange} />
     </div>
   );
 }

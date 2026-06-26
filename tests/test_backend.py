@@ -1,6 +1,7 @@
 import multiprocessing
 import time
 import unittest
+from unittest import mock
 
 import app
 
@@ -111,6 +112,64 @@ class BackendTests(unittest.TestCase):
                     ],
                 },
             ])
+
+    def test_fetch_info_falls_back_to_flat_metadata_when_format_unavailable(self):
+        class FakeYdl:
+            calls = 0
+            seen_options = []
+
+            def __init__(self, options):
+                self.options = options
+                FakeYdl.seen_options.append(options)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def extract_info(self, url, download=False):
+                FakeYdl.calls += 1
+                if FakeYdl.calls == 1:
+                    raise Exception("Requested format is not available")
+                return {
+                    "title": "Fallback title",
+                    "duration": 125,
+                    "webpage_url": url,
+                    "uploader": "Uploader",
+                }
+
+        with mock.patch.object(app.yt_dlp, "YoutubeDL", FakeYdl):
+            result = app.fetch_info("https://www.youtube.com/watch?v=test")
+
+        self.assertEqual(result["type"], "video")
+        self.assertEqual(result["title"], "Fallback title")
+        self.assertEqual(result["duration_str"], "2:05")
+        self.assertEqual(FakeYdl.calls, 2)
+        self.assertTrue(FakeYdl.seen_options[1]["extract_flat"])
+
+    def test_fetch_info_returns_collected_error_when_yt_dlp_returns_none(self):
+        class FakeYdl:
+            def __init__(self, options):
+                self.options = options
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def extract_info(self, url, download=False):
+                self.options["logger"].error(
+                    "[youtube] test: Sign in to confirm you're not a bot. Use --cookies"
+                )
+                return None
+
+        with mock.patch.object(app.yt_dlp, "YoutubeDL", FakeYdl):
+            result = app.fetch_info("https://www.youtube.com/watch?v=test")
+
+        self.assertIn("error", result)
+        self.assertIn("Sign in to confirm", result["error"])
 
 
 if __name__ == "__main__":
