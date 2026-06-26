@@ -71,6 +71,8 @@ export interface JobStatus {
 export interface CookieStatus {
   exists: boolean;
   mtime: string | null;
+  valid: boolean | null;
+  message: string;
 }
 
 export interface FetchInfoResult {

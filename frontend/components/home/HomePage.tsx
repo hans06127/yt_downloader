@@ -19,6 +19,7 @@ import {
   type TabKey,
 } from "@/components/home/types";
 import AppShell from "@/components/layout/AppShell";
+import CookieAlertPopup from "@/components/layout/CookieAlertPopup";
 import CookieStatus from "@/components/layout/CookieStatus";
 import ImportDownload from "@/components/tabs/ImportDownload";
 import MultiDownload from "@/components/tabs/MultiDownload";
@@ -28,6 +29,7 @@ import ActionButton from "@/components/ui/ActionButton";
 import {
   cancelAllJobs as cancelAllJobsApi,
   cancelJob as cancelJobApi,
+  convertTitles,
   fetchInfo as fetchInfoApi,
   fetchPlaylistStream,
   getDefaultDir,
@@ -87,6 +89,10 @@ function logError(event: string, details?: unknown) {
   console.error(`[YT Downloader] ${event}`, details ?? "");
 }
 
+function isCookieIssueMessage(message: string) {
+  return /cookie|cookies|登入|驗證|過期|not a bot|sign in/i.test(message);
+}
+
 export default function HomePage() {
   const { message: messageApi, modal } = AntdApp.useApp();
   const queryClient = useQueryClient();
@@ -102,6 +108,7 @@ export default function HomePage() {
   const [singleInfo, setSingleInfo] = useState<VideoItem | null>(null);
   const [singleLoading, setSingleLoading] = useState(false);
   const [singleError, setSingleError] = useState("");
+  const [cookieAlert, setCookieAlert] = useState<{ title: string; message: string } | null>(null);
 
   const [multiText, setMultiText] = useState("");
   const [multiItems, setMultiItems] = useState<VideoItem[]>([]);
@@ -127,6 +134,9 @@ export default function HomePage() {
   const cookieQuery = useQuery({
     queryKey: ["cookie-status"],
     queryFn: getCookieStatus,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: true,
+    staleTime: 0,
   });
   const defaultDirQuery = useQuery({
     queryKey: ["default-dir"],
@@ -139,9 +149,25 @@ export default function HomePage() {
   const cookieLoading =
     cookieQuery.isFetching || uploadCookieMutation.isPending || deleteCookieMutation.isPending;
 
+  const showCookieAlert = (message: string, title = "Cookie 需要更新") => {
+    setCookieAlert({ title, message });
+  };
+
+  const maybeShowCookieAlert = (message: string) => {
+    if (isCookieIssueMessage(message)) {
+      showCookieAlert(message);
+    }
+  };
+
   useEffect(() => {
     void useFailedDownloadStore.persist.rehydrate();
   }, []);
+
+  useEffect(() => {
+    if (cookie?.exists && cookie.valid === false) {
+      showCookieAlert(cookie.message || "cookies.txt 無效或已過期，請重新匯出並上傳。");
+    }
+  }, [cookie?.exists, cookie?.message, cookie?.valid]);
 
   useEffect(
     () => () => {
@@ -243,6 +269,7 @@ export default function HomePage() {
             if (entry.status === "success") {
               logInfo(`下載完成 [${tabLabels[tab]}]`, entry);
             } else {
+              if (entry.message) maybeShowCookieAlert(entry.message);
               logError(`下載失敗 [${tabLabels[tab]}]`, entry);
             }
           });
@@ -315,6 +342,7 @@ export default function HomePage() {
         messageApi.error(result.error);
       } else {
         messageApi.success("Cookie 已更新");
+        setCookieAlert(null);
       }
       await queryClient.invalidateQueries({ queryKey: ["cookie-status"] });
     } catch (error) {
@@ -353,8 +381,14 @@ export default function HomePage() {
 
     try {
       const info = await fetchInfoApi(url);
+      if (!info) {
+        setSingleError("查詢失敗：後端沒有回傳影片資訊");
+        logError("單一影片查詢失敗", { url, error: "empty response" });
+        return;
+      }
       if (info.error) {
         setSingleError(info.error);
+        maybeShowCookieAlert(info.error);
         logError("單一影片查詢失敗", { url, error: info.error });
         return;
       }
@@ -370,6 +404,7 @@ export default function HomePage() {
     } catch (error) {
       const message = errorMessage(error);
       setSingleError(message);
+      maybeShowCookieAlert(message);
       logError("單一影片查詢失敗", { url, error: message });
     } finally {
       setSingleLoading(false);
@@ -396,6 +431,7 @@ export default function HomePage() {
     } catch (error) {
       const message = errorMessage(error);
       logError("單一影片下載送出失敗", { url, error: message });
+      maybeShowCookieAlert(message);
       messageApi.error(message);
     }
   };
@@ -413,7 +449,12 @@ export default function HomePage() {
       for (const url of urls) {
         try {
           const info = await fetchInfoApi(url);
+          if (!info) {
+            logError("網址查詢失敗", { url, error: "empty response" });
+            continue;
+          }
           if (info.error) {
+            maybeShowCookieAlert(info.error);
             logError("網址查詢失敗", { url, error: info.error });
             continue;
           }
@@ -425,7 +466,9 @@ export default function HomePage() {
           }
           logInfo("網址查詢成功", { url, type: info.type, title: info.title });
         } catch (error) {
-          logError("網址查詢失敗", { url, error: errorMessage(error) });
+          const message = errorMessage(error);
+          maybeShowCookieAlert(message);
+          logError("網址查詢失敗", { url, error: message });
         }
       }
 
@@ -433,6 +476,7 @@ export default function HomePage() {
       logInfo("多個網址查詢完成", { requested: urls.length, loaded: items.length });
     } catch (error) {
       const message = errorMessage(error);
+      maybeShowCookieAlert(message);
       logError("多個網址查詢失敗", message);
       messageApi.error(message);
     } finally {
@@ -452,6 +496,7 @@ export default function HomePage() {
       await fetchPlaylistStream(url, (msg) => {
         if ("error" in msg) {
           setPlaylistError(msg.error);
+          maybeShowCookieAlert(msg.error);
           logError("播放清單查詢失敗", { url, error: msg.error });
           return;
         }
@@ -480,12 +525,14 @@ export default function HomePage() {
 
         if (msg.type === "error") {
           setPlaylistError(msg.message);
+          maybeShowCookieAlert(msg.message);
           logError("播放清單查詢失敗", { url, error: msg.message });
         }
       });
     } catch (error) {
       const message = errorMessage(error);
       setPlaylistError(message);
+      maybeShowCookieAlert(message);
       logError("播放清單查詢失敗", { url, error: message });
     } finally {
       setPlaylistLoading(false);
@@ -532,8 +579,14 @@ export default function HomePage() {
       for (const item of sourceItems) {
         try {
           const info = await fetchInfoApi(item.url);
+          if (!info) {
+            nextItems.push(item);
+            logError("匯入影片查詢失敗", { url: item.url, error: "empty response" });
+            continue;
+          }
           if (info.error) {
             nextItems.push(item);
+            maybeShowCookieAlert(info.error);
             logError("匯入影片查詢失敗", { url: item.url, error: info.error });
           } else if (info.type === "playlist") {
             nextItems.push(...(info.items || []).map((entry) => normalizeItem({ ...entry, _checked: true })));
@@ -544,7 +597,9 @@ export default function HomePage() {
           }
         } catch (error) {
           nextItems.push(item);
-          logError("匯入影片查詢失敗", { url: item.url, error: errorMessage(error) });
+          const message = errorMessage(error);
+          maybeShowCookieAlert(message);
+          logError("匯入影片查詢失敗", { url: item.url, error: message });
         }
       }
 
@@ -554,6 +609,7 @@ export default function HomePage() {
     } catch (error) {
       const message = errorMessage(error);
       setImportMessage(message);
+      maybeShowCookieAlert(message);
       logError("匯入影片查詢失敗", message);
     } finally {
       setImportLoading(false);
@@ -591,6 +647,7 @@ export default function HomePage() {
     } catch (error) {
       const message = errorMessage(error);
       logError(`下載送出失敗 [${tabLabels[tab]}]`, message);
+      maybeShowCookieAlert(message);
       messageApi.error(message);
     }
   };
@@ -613,6 +670,7 @@ export default function HomePage() {
     } catch (error) {
       const message = errorMessage(error);
       logError(`重新下載送出失敗 [${tabLabels[tab]}]`, message);
+      maybeShowCookieAlert(message);
       messageApi.error(message);
     }
   };
@@ -654,6 +712,7 @@ export default function HomePage() {
       } catch (error) {
         const message = errorMessage(error);
         logError(`持久化失敗項目重試送出失敗 [${tabLabels[first.tab]}]`, message);
+        maybeShowCookieAlert(message);
         messageApi.error(message);
       }
     }
@@ -739,6 +798,32 @@ export default function HomePage() {
     );
   };
 
+  const updateSingleTitle = (customTitle: string) => {
+    setSingleInfo((item) => (item ? { ...item, custom_title: customTitle } : item));
+  };
+
+  const convertSingleTitle = async () => {
+    const sourceTitle = (singleInfo?.custom_title || singleInfo?.title || "").trim();
+    if (!sourceTitle) return;
+
+    try {
+      const result = await convertTitles([sourceTitle]);
+      const convertedTitle = result.converted[0] || sourceTitle;
+      setSingleInfo((item) =>
+        item
+          ? {
+              ...item,
+              custom_title: convertedTitle,
+              orig_title: convertedTitle !== sourceTitle ? sourceTitle : item.orig_title,
+              was_converted: item.was_converted || convertedTitle !== sourceTitle,
+            }
+          : item,
+      );
+    } catch (error) {
+      logError("單一影片標題轉換失敗", errorMessage(error));
+    }
+  };
+
   const updateSegments = (tab: ListTabKey, index: number, segments: DownloadSegment[]) => {
     updateListItem(tab, (items) =>
       items.map((item, idx) => (idx === index ? { ...item, segments } : item)),
@@ -817,6 +902,8 @@ export default function HomePage() {
             setSingleInfo((item) => (item ? { ...item, segments } : item))
           }
           onStart={startSingleDownload}
+          onTitleBlur={() => void convertSingleTitle()}
+          onTitleChange={updateSingleTitle}
           onUrlChange={setSingleUrl}
           settings={settings.single}
           updateMediaType={(mediaType) => updateMediaType("single", mediaType)}
@@ -918,6 +1005,15 @@ export default function HomePage() {
         onClear={confirmClearFailedRecords}
         onRemove={removeFailedRecord}
         onRetry={(records) => void retryStoredFailures(records)}
+      />
+
+      <CookieAlertPopup
+        loading={cookieLoading}
+        message={cookieAlert?.message || ""}
+        open={Boolean(cookieAlert)}
+        title={cookieAlert?.title || "Cookie 需要更新"}
+        onClose={() => setCookieAlert(null)}
+        onUploadClick={() => cookieInputRef.current?.click()}
       />
     </AppShell>
   );

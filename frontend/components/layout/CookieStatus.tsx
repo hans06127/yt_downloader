@@ -22,9 +22,15 @@ export default function CookieStatus({
   onDelete,
   onUpload,
 }: CookieStatusProps) {
-  const statusClass = cookie?.exists ? "status-done" : "status-queued";
+  const statusClass = cookie?.exists
+    ? cookie.valid === false
+      ? "status-error"
+      : "status-done"
+    : "status-queued";
   const statusText = cookie?.exists
-    ? `Cookie 已載入${cookie.mtime ? ` ${cookie.mtime}` : ""}`
+    ? cookie.valid === false
+      ? "Cookie 無效或已過期"
+      : `Cookie 已載入${cookie.mtime ? ` ${cookie.mtime}` : ""}`
     : "尚未載入 Cookie";
 
   return (

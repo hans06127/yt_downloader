@@ -45,4 +45,6 @@ export const mockJobStatus: JobStatus = {
 export const mockCookieStatus: CookieStatus = {
   exists: true,
   mtime: "2026/06/20 10:30",
+  valid: true,
+  message: "Cookie 可讀取且尚未過期。",
 };

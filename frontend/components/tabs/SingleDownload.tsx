@@ -20,6 +20,8 @@ interface SingleDownloadProps {
   onReset: () => void;
   onStart: () => void;
   onSegmentsChange: (segments: DownloadSegment[]) => void;
+  onTitleBlur: () => void;
+  onTitleChange: (title: string) => void;
   onUrlChange: (url: string) => void;
   updateMediaType: (mediaType: MediaType) => void;
   updateSettings: (patch: Partial<DownloadSettings>) => void;
@@ -36,8 +38,10 @@ export default function SingleDownload({
   onOpenFolder,
   onRetryFailed,
   onReset,
-  onStart,
   onSegmentsChange,
+  onStart,
+  onTitleBlur,
+  onTitleChange,
   onUrlChange,
   settings,
   updateMediaType,
@@ -57,7 +61,15 @@ export default function SingleDownload({
           onSubmit={onFetch}
         />
         {error ? <div className="status-pill status-error">{error}</div> : null}
-        {info ? <VideoInfo item={info} mediaType={settings.mediaType} onSegmentsChange={onSegmentsChange} /> : null}
+        {info ? (
+          <VideoInfo
+            item={info}
+            mediaType={settings.mediaType}
+            onSegmentsChange={onSegmentsChange}
+            onTitleBlur={onTitleBlur}
+            onTitleChange={onTitleChange}
+          />
+        ) : null}
       </section>
 
       {info ? (
@@ -66,7 +78,7 @@ export default function SingleDownload({
           onReset={onReset}
           onStart={onStart}
           settings={settings}
-          startLabel="下載此影片"
+          startLabel="開始下載"
           updateMediaType={updateMediaType}
           updateSettings={updateSettings}
         />

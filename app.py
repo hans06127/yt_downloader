@@ -69,11 +69,98 @@ download_jobs_lock = threading.RLock()
 # Cookie file path
 COOKIE_FILE = APP_DIR / "cookies.txt"
 
+class YtdlpErrorCollector:
+    """Collect yt-dlp errors that are swallowed when ignoreerrors=True."""
+
+    def __init__(self):
+        self.errors = []
+
+    def debug(self, message):
+        return None
+
+    def warning(self, message):
+        logger.warning("[yt-dlp] %s", message)
+
+    def error(self, message):
+        self.errors.append(str(message))
+        logger.error("[yt-dlp] %s", message)
+
+    def message(self):
+        return self.errors[-1] if self.errors else ""
+
 def get_cookie_opt():
     """Return cookiefile path if cookies.txt exists"""
     if COOKIE_FILE.exists():
         return str(COOKIE_FILE)
     return None
+
+def inspect_cookie_file():
+    """Return local validity details for cookies.txt without contacting YouTube."""
+    if not COOKIE_FILE.exists():
+        return {
+            "exists": False,
+            "mtime": None,
+            "valid": None,
+            "message": "尚未上傳 cookies.txt",
+        }
+
+    mtime = datetime.datetime.fromtimestamp(COOKIE_FILE.stat().st_mtime).strftime("%Y/%m/%d %H:%M")
+    jar = http.cookiejar.MozillaCookieJar()
+    try:
+        jar.load(str(COOKIE_FILE), ignore_discard=True, ignore_expires=True)
+    except Exception as exc:
+        logger.warning("[cookie] Failed to parse cookie file: %s", exc)
+        return {
+            "exists": True,
+            "mtime": mtime,
+            "valid": False,
+            "message": "cookies.txt 格式無法讀取，請重新匯出 YouTube cookies。",
+        }
+
+    youtube_cookies = [
+        cookie for cookie in jar
+        if "youtube.com" in cookie.domain or "google.com" in cookie.domain
+    ]
+    if not youtube_cookies:
+        return {
+            "exists": True,
+            "mtime": mtime,
+            "valid": False,
+            "message": "cookies.txt 中沒有 YouTube/Google cookie，請重新匯出登入後的 cookies。",
+        }
+
+    now = time.time()
+    unexpired = [
+        cookie for cookie in youtube_cookies
+        if cookie.expires is None or cookie.expires > now
+    ]
+    if not unexpired:
+        return {
+            "exists": True,
+            "mtime": mtime,
+            "valid": False,
+            "message": "cookies.txt 內的 YouTube cookie 已過期，請重新匯出並上傳。",
+        }
+
+    auth_cookie_names = {
+        "SID", "HSID", "SSID", "APISID", "SAPISID", "LOGIN_INFO",
+        "__Secure-1PSID", "__Secure-3PSID", "__Secure-1PAPISID", "__Secure-3PAPISID",
+    }
+    has_auth_cookie = any(cookie.name in auth_cookie_names for cookie in unexpired)
+    if not has_auth_cookie:
+        return {
+            "exists": True,
+            "mtime": mtime,
+            "valid": False,
+            "message": "cookies.txt 看起來不是登入狀態的 YouTube cookie，請用已登入帳號重新匯出。",
+        }
+
+    return {
+        "exists": True,
+        "mtime": mtime,
+        "valid": True,
+        "message": "Cookie 可讀取且尚未過期。",
+    }
 
 def get_system_downloads_dir():
     """Get the system default Downloads directory"""
@@ -482,17 +569,19 @@ def complete_playlist_entries(url, ydl_entries):
 
 def fetch_info(url):
     """Fetch video/playlist info without downloading"""
+    error_collector = YtdlpErrorCollector()
     ydl_opts = build_ydl_opts_base({
         "extract_flat": "in_playlist",
         "skip_download": True,
         "lazy_playlist": False,       # Force fetch all pages
         "ignoreerrors": True,         # Skip unavailable videos
+        "logger": error_collector,
     })
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             if info is None:
-                return None
+                return {"error": normalize_query_error(error_collector.message() or "No video info returned")}
 
             if info.get("_type") == "playlist":
                 entries = [e for e in (info.get("entries", []) or []) if e]
@@ -539,24 +628,68 @@ def fetch_info(url):
                     "items": items,
                 }
             else:
-                duration = info.get("duration")
-                orig_title = info.get("title", "Unknown")
-                conv_title, was_conv = s2t_title(orig_title)
-                return {
-                    "type": "video",
-                    "title": conv_title,
-                    "orig_title": orig_title,
-                    "was_converted": was_conv,
-                    "url": url,
-                    "duration": duration,
-                    "duration_str": format_duration(duration),
-                    "category": info.get("categories", [None])[0] if info.get("categories") else None,
-                    "uploader": info.get("uploader", ""),
-                    "thumbnail": info.get("thumbnail", ""),
-                    "lang": "zh-CN" if was_conv else "other",
-                }
+                return format_video_info(info, url)
     except Exception as e:
-        return {"error": str(e)}
+        fallback = fetch_flat_video_info(url, e)
+        if fallback:
+            return fallback
+        return {"error": normalize_query_error(str(e))}
+
+def normalize_query_error(message):
+    text = str(message or "No video info returned").strip()
+    if text.startswith("ERROR: "):
+        text = text[7:].strip()
+    if "Sign in to confirm" in text and "not a bot" in text:
+        if get_cookie_opt():
+            return (
+                "YouTube 要求登入/機器人驗證，目前 cookies.txt 可能已過期或不是 YouTube 登入狀態。"
+                "請重新匯出並上傳有效的 YouTube cookies.txt 後再查詢。"
+                f" 原始訊息：{text}"
+            )
+        return (
+            "YouTube 要求登入/機器人驗證，請先上傳有效的 YouTube cookies.txt 後再查詢。"
+            f" 原始訊息：{text}"
+        )
+    return text
+
+def format_video_info(info, url):
+    duration = info.get("duration")
+    orig_title = info.get("title", "Unknown")
+    conv_title, was_conv = s2t_title(orig_title)
+    return {
+        "type": "video",
+        "title": conv_title,
+        "orig_title": orig_title,
+        "was_converted": was_conv,
+        "url": info.get("webpage_url") or info.get("original_url") or url,
+        "duration": duration,
+        "duration_str": format_duration(duration),
+        "category": info.get("categories", [None])[0] if info.get("categories") else None,
+        "uploader": info.get("uploader", ""),
+        "thumbnail": info.get("thumbnail", ""),
+        "lang": "zh-CN" if was_conv else "other",
+    }
+
+def fetch_flat_video_info(url, original_error):
+    """Fall back to flat metadata when full extraction fails on format selection."""
+    if "Requested format is not available" not in str(original_error):
+        return None
+
+    logger.warning("[query] Full extraction failed on format selection, retrying flat metadata: %s", url)
+    ydl_opts = build_ydl_opts_base({
+        "extract_flat": True,
+        "skip_download": True,
+        "ignoreerrors": False,
+    })
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+        if not info or info.get("_type") == "playlist":
+            return None
+        return format_video_info(info, url)
+    except Exception as fallback_error:
+        logger.warning("[query] Flat metadata fallback failed: %s - %s", url, fallback_error)
+        return None
 
 def format_duration(seconds):
     if not seconds:
@@ -934,6 +1067,8 @@ def api_fetch_info():
         return jsonify({"error": "No URL provided"}), 400
     logger.info("[query] Fetch info started: %s", url)
     info = fetch_info(url)
+    if info is None:
+        info = {"error": "No video info returned"}
     if info and not info.get("error"):
         logger.info("[query] Fetch info succeeded: type=%s title=%s", info.get("type"), info.get("title"))
     else:
@@ -1123,11 +1258,7 @@ def api_cancel_all_jobs():
 
 @app.route("/api/cookie-status")
 def api_cookie_status():
-    exists = COOKIE_FILE.exists()
-    mtime = None
-    if exists:
-        mtime = datetime.datetime.fromtimestamp(COOKIE_FILE.stat().st_mtime).strftime("%Y/%m/%d %H:%M")
-    return jsonify({"exists": exists, "mtime": mtime})
+    return jsonify(inspect_cookie_file())
 
 @app.route("/api/upload-cookie", methods=["POST"])
 def api_upload_cookie():
