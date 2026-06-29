@@ -7,6 +7,7 @@ export type Lang = "zh-TW" | "zh-CN" | "other";
 export interface DownloadSegment {
   start: number;
   end: number;
+  title?: string;
 }
 
 export interface VideoItem {

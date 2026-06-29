@@ -594,7 +594,7 @@ select option {
   align-items: center;
   display: grid;
   gap: 8px;
-  grid-template-columns: 34px minmax(0, 1fr) auto minmax(0, 1fr) 36px;
+  grid-template-columns: 34px minmax(140px, 1.4fr) minmax(90px, 1fr) auto minmax(90px, 1fr) 36px;
 
   input {
     min-width: 0;
@@ -1114,7 +1114,7 @@ select option {
   }
 
   .segment-row {
-    grid-template-columns: 28px minmax(0, 1fr) auto minmax(0, 1fr) 36px;
+    grid-template-columns: 28px minmax(0, 1fr) minmax(0, 1fr) auto minmax(0, 1fr) 36px;
   }
 
   .history-heading {

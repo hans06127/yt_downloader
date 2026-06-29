@@ -11,10 +11,13 @@ import time
 import http.cookiejar
 import urllib.parse
 import urllib.request
+import shutil
+import subprocess
+import tempfile
+import math
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 import yt_dlp
-from yt_dlp.utils import download_range_func
 import openpyxl
 import opencc
 from pathlib import Path
@@ -126,7 +129,7 @@ def inspect_cookie_file():
             "exists": True,
             "mtime": mtime,
             "valid": False,
-            "message": "cookies.txt 中沒有 YouTube/Google cookie，請重新匯出登入後的 cookies。",
+            "message": "cookies.txt 中沒有 YouTube/Google cookie，請登入後重新匯出 cookies。",
         }
 
     now = time.time()
@@ -639,16 +642,20 @@ def normalize_query_error(message):
     text = str(message or "No video info returned").strip()
     if text.startswith("ERROR: "):
         text = text[7:].strip()
+    if "known to use DRM protection" in text or "[DRM]" in text:
+        return (
+            "此影片或網站使用 DRM 保護，yt-dlp 不支援下載 DRM 內容。"
+            f"原始訊息：{text}"
+        )
     if "Sign in to confirm" in text and "not a bot" in text:
         if get_cookie_opt():
             return (
-                "YouTube 要求登入/機器人驗證，目前 cookies.txt 可能已過期或不是 YouTube 登入狀態。"
-                "請重新匯出並上傳有效的 YouTube cookies.txt 後再查詢。"
-                f" 原始訊息：{text}"
+                "YouTube 要求登入或機器人驗證，目前 cookies.txt 可能已過期或不是 YouTube 登入狀態。"
+                f"請重新匯出並上傳有效的 YouTube cookies.txt。原始訊息：{text}"
             )
         return (
-            "YouTube 要求登入/機器人驗證，請先上傳有效的 YouTube cookies.txt 後再查詢。"
-            f" 原始訊息：{text}"
+            "YouTube 要求登入或機器人驗證，請先上傳有效的 YouTube cookies.txt 後再試。"
+            f"原始訊息：{text}"
         )
     return text
 
@@ -702,18 +709,99 @@ def format_duration(seconds):
         return f"{h}:{m:02d}:{s:02d}"
     return f"{m}:{s:02d}"
 
+def safe_filename(name, fallback="download"):
+    safe = "".join(c for c in str(name or "") if c not in r'\/:*?"<>|').strip()
+    return safe or fallback
+
+def find_ffmpeg_exe():
+    bundled = APP_DIR / "ffmpeg.exe"
+    if bundled.exists():
+        return str(bundled)
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    raise RuntimeError("ffmpeg not found")
+
+def newest_downloaded_file(folder):
+    files = [path for path in Path(folder).iterdir() if path.is_file() and not path.name.endswith(".part")]
+    if not files:
+        raise RuntimeError("找不到已下載的來源檔")
+    return max(files, key=lambda path: path.stat().st_mtime)
+
+def segment_title(base_title, segment, index):
+    return safe_filename(
+        segment.get("title")
+        or f"{base_title} - segment {index:02d} ({format_segment_time(segment['start'])}-{format_segment_time(segment['end'])})"
+    )
+
+def unique_output_path(output_dir, filename):
+    candidate = Path(output_dir) / filename
+    if not candidate.exists():
+        return candidate
+    stem = candidate.stem
+    suffix = candidate.suffix
+    for index in range(2, 1000):
+        next_candidate = candidate.with_name(f"{stem} - {index:02d}{suffix}")
+        if not next_candidate.exists():
+            return next_candidate
+    raise RuntimeError(f"Could not create unique output filename for {filename}")
+
+def ffmpeg_timeout_for_segment(segment):
+    duration = max(0, float(segment["end"]) - float(segment["start"]))
+    return max(300, math.ceil(duration * 3))
+
+def run_ffmpeg(command, timeout):
+    return subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+        check=False,
+    )
+
+def assert_nonempty_file(path, description):
+    path = Path(path)
+    if not path.exists():
+        raise RuntimeError(f"{description} 未產生")
+    if path.stat().st_size <= 0:
+        raise RuntimeError(f"{description} 是空檔")
+
+def cut_segment_file(source_file, output_file, segment):
+    ffmpeg = find_ffmpeg_exe()
+    source_file = Path(source_file)
+    output_file = Path(output_file)
+    assert_nonempty_file(source_file, "下載來源檔")
+    temp_output = output_file.with_name(f".{output_file.stem}.{uuid.uuid4().hex}{output_file.suffix}")
+    base_command = [ffmpeg, "-y", "-ss", str(segment["start"]), "-to", str(segment["end"]), "-i", str(source_file)]
+    timeout = ffmpeg_timeout_for_segment(segment)
+    try:
+        result = run_ffmpeg([*base_command, "-map", "0", "-c", "copy", str(temp_output)], timeout)
+        if result.returncode != 0:
+            if temp_output.exists():
+                temp_output.unlink()
+            result = run_ffmpeg([*base_command, str(temp_output)], timeout)
+        if result.returncode != 0:
+            message = (result.stderr or result.stdout or "ffmpeg segment cut failed").strip()
+            raise RuntimeError(message[-1000:])
+        assert_nonempty_file(temp_output, "分段輸出檔")
+        temp_output.replace(output_file)
+    except subprocess.TimeoutExpired as error:
+        if temp_output.exists():
+            temp_output.unlink()
+        raise RuntimeError(f"ffmpeg 切割分段逾時，已等待 {error.timeout} 秒") from error
+    except BaseException:
+        if temp_output.exists():
+            temp_output.unlink()
+        raise
+
 def download_item_process(event_queue, item, media_type, extension, output_dir):
     """Download one item in a child process so the parent can terminate it."""
     url = item["url"]
     custom_title = item.get("custom_title", "").strip() or None
     segments = item.get("segments") or []
     last_progress = {"percent": -1, "time": 0.0}
-
-    if custom_title:
-        safe = "".join(c for c in custom_title if c not in r'\/:*?"<>|').strip()
-        outtmpl = os.path.join(output_dir, f"{safe}.%(ext)s")
-    else:
-        outtmpl = os.path.join(output_dir, "%(title)s.%(ext)s")
 
     def progress_hook(data):
         if data["status"] == "downloading":
@@ -735,19 +823,56 @@ def download_item_process(event_queue, item, media_type, extension, output_dir):
                 "filename": data.get("filename", ""),
             })
 
+    def build_download_opts(outtmpl):
+        opts = build_ydl_opts_base({
+            "format": get_format_string(media_type, extension),
+            "outtmpl": outtmpl,
+            "progress_hooks": [progress_hook],
+            "postprocessors": get_postprocessors(media_type, extension),
+        })
+        if media_type == "video" and extension in ["mkv", "avi", "mov"]:
+            opts["merge_output_format"] = extension
+        return opts
+
+    if segments:
+        base_title = safe_filename(custom_title or "download")
+        try:
+            with tempfile.TemporaryDirectory(prefix="yt_downloader_segments_") as temp_dir:
+                source_template = os.path.join(temp_dir, "source.%(ext)s")
+                with yt_dlp.YoutubeDL(build_download_opts(source_template)) as ydl:
+                    ydl.download([url])
+
+                source_file = newest_downloaded_file(temp_dir)
+                total_segments = len(segments)
+                for index, segment in enumerate(segments, start=1):
+                    output_name = f"{segment_title(base_title, segment, index)}.{extension}"
+                    output_file = unique_output_path(output_dir, output_name)
+                    cut_segment_file(source_file, output_file, segment)
+                    event_queue.put({
+                        "type": "progress",
+                        "percent": round(index / total_segments * 100, 1),
+                        "filename": str(output_file),
+                    })
+            event_queue.put({"type": "result", "status": "success"})
+        except BaseException as error:
+            event_queue.put({
+                "type": "result",
+                "status": "error",
+                "message": str(error),
+            })
+        return
+
+    if custom_title:
+        outtmpl = os.path.join(output_dir, f"{safe_filename(custom_title)}.%(ext)s")
+    else:
+        outtmpl = os.path.join(output_dir, "%(title)s.%(ext)s")
+
     ydl_opts = build_ydl_opts_base({
         "format": get_format_string(media_type, extension),
         "outtmpl": outtmpl,
         "progress_hooks": [progress_hook],
         "postprocessors": get_postprocessors(media_type, extension),
     })
-    if segments:
-        segment = segments[0]
-        ydl_opts["download_ranges"] = download_range_func(
-            None,
-            [(segment["start"], segment["end"])],
-        )
-        ydl_opts["force_keyframes_at_cuts"] = True
     if media_type == "video" and extension in ["mkv", "avi", "mov"]:
         ydl_opts["merge_output_format"] = extension
 
@@ -1155,7 +1280,7 @@ def api_start_download():
 
 
 def expand_download_segments(raw_items):
-    """Validate ranges and expand each requested segment into its own download item."""
+    """Validate ranges and keep requested segments grouped by source video."""
     expanded = []
     for raw_item in raw_items:
         if not isinstance(raw_item, dict) or not str(raw_item.get("url", "")).strip():
@@ -1184,26 +1309,20 @@ def expand_download_segments(raw_items):
                 raise ValueError("Segment start and end must be numbers") from None
             if start < 0 or end <= start:
                 raise ValueError("Segment end must be greater than start")
-            normalized.append({"start": start, "end": end})
-
-        normalized.sort(key=lambda segment: segment["start"])
-        for index, segment in enumerate(normalized):
-            if index and segment["start"] < normalized[index - 1]["end"]:
-                raise ValueError("Download segments cannot overlap")
-
-        base_title = item["custom_title"] or "download"
-        for index, segment in enumerate(normalized, start=1):
-            expanded.append({
-                **item,
-                "custom_title": (
-                    f"{base_title} - 片段 {index:02d} "
-                    f"({format_segment_time(segment['start'])}-{format_segment_time(segment['end'])})"
-                ),
-                "segments": [segment],
+            normalized.append({
+                "start": start,
+                "end": end,
+                "title": str(segment.get("title", "")).strip(),
             })
 
+        normalized.sort(key=lambda segment: segment["start"])
+        expanded.append({
+            **item,
+            "segments": normalized,
+        })
+
     if len(expanded) > 1000:
-        raise ValueError("A download job supports at most 1000 files after segment expansion")
+        raise ValueError("A download job supports at most 1000 source videos")
     return expanded
 
 

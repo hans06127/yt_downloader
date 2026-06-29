@@ -20,6 +20,7 @@ interface MediaToolsProps {
 }
 
 interface SegmentDraft {
+  title: string;
   start: string;
   end: string;
 }
@@ -35,10 +36,11 @@ export default function MediaTools({ item, mediaType, onSegmentsChange }: MediaT
     setDrafts(
       item.segments.length
         ? item.segments.map((segment) => ({
+            title: segment.title || "",
             start: formatTimestamp(segment.start),
             end: formatTimestamp(segment.end),
           }))
-        : [{ start: "00:00", end: item.duration ? formatTimestamp(item.duration) : "" }],
+        : [{ title: "", start: "00:00", end: item.duration ? formatTimestamp(item.duration) : "" }],
     );
     setError("");
     setSegmentsOpen(true);
@@ -46,6 +48,7 @@ export default function MediaTools({ item, mediaType, onSegmentsChange }: MediaT
 
   const saveSegments = () => {
     const parsed = drafts.map((draft) => ({
+      title: draft.title.trim(),
       start: parseTimestamp(draft.start),
       end: parseTimestamp(draft.end),
     }));
@@ -56,7 +59,11 @@ export default function MediaTools({ item, mediaType, onSegmentsChange }: MediaT
     }
 
     const segments = parsed
-      .map((segment) => ({ start: segment.start as number, end: segment.end as number }))
+      .map((segment) => ({
+        title: segment.title,
+        start: segment.start as number,
+        end: segment.end as number,
+      }))
       .sort((a, b) => a.start - b.start);
 
     if (segments.some((segment) => segment.start < 0 || segment.end <= segment.start)) {
@@ -68,11 +75,6 @@ export default function MediaTools({ item, mediaType, onSegmentsChange }: MediaT
       setError(`區段不可超過影片長度 ${item.duration_str}。`);
       return;
     }
-    if (segments.some((segment, index) => index > 0 && segment.start < segments[index - 1].end)) {
-      setError("時間區段不可互相重疊。");
-      return;
-    }
-
     onSegmentsChange(segments);
     setSegmentsOpen(false);
   };
@@ -127,7 +129,7 @@ export default function MediaTools({ item, mediaType, onSegmentsChange }: MediaT
       <Modal
         open={segmentsOpen}
         title={`下載區段：${item.title}`}
-        width={640}
+        width={820}
         okText="套用區段"
         cancelText="取消"
         onCancel={() => setSegmentsOpen(false)}
@@ -138,6 +140,18 @@ export default function MediaTools({ item, mediaType, onSegmentsChange }: MediaT
           {drafts.map((draft, index) => (
             <div className="segment-row" key={index}>
               <span className="segment-index">{String(index + 1).padStart(2, "0")}</span>
+              <input
+                aria-label={`第 ${index + 1} 段檔名`}
+                placeholder={`Segment ${index + 1}`}
+                value={draft.title}
+                onChange={(event) =>
+                  setDrafts((current) =>
+                    current.map((entry, draftIndex) =>
+                      draftIndex === index ? { ...entry, title: event.target.value } : entry,
+                    ),
+                  )
+                }
+              />
               <input
                 aria-label={`第 ${index + 1} 段開始時間`}
                 placeholder="00:00"
@@ -177,7 +191,7 @@ export default function MediaTools({ item, mediaType, onSegmentsChange }: MediaT
           <div className="segment-actions">
             <ActionButton
               size="sm"
-              onClick={() => setDrafts((current) => [...current, { start: "", end: "" }])}
+              onClick={() => setDrafts((current) => [...current, { title: "", start: "", end: "" }])}
             >
               <PlusOutlined />
               新增區段
