@@ -177,6 +177,20 @@ def get_default_output_dir(title_hint="downloads"):
     base_dir.mkdir(parents=True, exist_ok=True)
     return str(base_dir)
 
+def resolve_output_dir(output_dir, title_hint="downloads"):
+    """Resolve user output paths without ever defaulting to the process cwd."""
+    raw_output_dir = str(output_dir or "").strip()
+    if not raw_output_dir:
+        return get_default_output_dir(title_hint)
+
+    requested = Path(raw_output_dir).expanduser()
+    if requested.is_absolute():
+        resolved = requested
+    else:
+        resolved = get_system_downloads_dir() / requested
+    resolved.mkdir(parents=True, exist_ok=True)
+    return str(resolved)
+
 def get_format_string(media_type, extension):
     """Build yt-dlp format string"""
     if media_type == "audio":
@@ -928,10 +942,7 @@ def download_worker(job_id, items, media_type, extension, output_dir, title_hint
             "started_at": datetime.datetime.now().isoformat(timespec="seconds"),
         })
 
-    if not output_dir:
-        output_dir = get_default_output_dir(title_hint)
-    else:
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
+    output_dir = resolve_output_dir(output_dir, title_hint)
 
     with download_jobs_lock:
         job["output_dir"] = output_dir
