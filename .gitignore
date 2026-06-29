@@ -15,6 +15,7 @@ env/
 cookies.txt
 downloads/
 .logs/
+frontend/public/mockServiceWorker.js
 
 # PyInstaller output
 dist/
