@@ -671,6 +671,12 @@ def normalize_query_error(message):
             "YouTube 要求登入或機器人驗證，請先上傳有效的 YouTube cookies.txt 後再試。"
             f"原始訊息：{text}"
         )
+    if "HTTP Error 403" in text or "Forbidden" in text:
+        return (
+            "下載資料流被伺服器拒絕（HTTP 403）。這通常是 cookies.txt 已失效、YouTube 風控、"
+            "或下載網址簽名已過期。請重新匯出並上傳有效的 YouTube cookies.txt 後再試。"
+            f"原始訊息：{text}"
+        )
     return text
 
 def format_video_info(info, url):
@@ -872,7 +878,7 @@ def download_item_process(event_queue, item, media_type, extension, output_dir):
             event_queue.put({
                 "type": "result",
                 "status": "error",
-                "message": str(error),
+                "message": normalize_query_error(str(error)),
             })
         return
 
@@ -898,7 +904,7 @@ def download_item_process(event_queue, item, media_type, extension, output_dir):
         event_queue.put({
             "type": "result",
             "status": "error",
-            "message": str(error),
+            "message": normalize_query_error(str(error)),
         })
 
 

@@ -1,4 +1,5 @@
 import type { FetchInfoResult, FilterState, VideoItem } from "@/lib/types";
+import axios from "axios";
 
 export function parseUrls(text: string) {
   const urls = text
@@ -11,6 +12,10 @@ export function parseUrls(text: string) {
 }
 
 export function errorMessage(error: unknown) {
+  if (axios.isAxiosError(error) && error.code === "ECONNABORTED") {
+    return "網址查詢逾時，後端可能仍在處理。請稍後重試，或改用播放清單分批載入。";
+  }
+
   return error instanceof Error ? error.message : String(error);
 }
 

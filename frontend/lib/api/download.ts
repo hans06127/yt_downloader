@@ -1,8 +1,10 @@
 import type { FetchInfoResult, JobStatus, StartDownloadPayload, StreamMessage } from "@/lib/types";
 import api from "./index";
 
+const FETCH_INFO_TIMEOUT_MS = 120000;
+
 export const fetchInfo = (url: string) =>
-  api.post<FetchInfoResult>("/fetch-info", { url }).then((r) => r.data);
+  api.post<FetchInfoResult>("/fetch-info", { url }, { timeout: FETCH_INFO_TIMEOUT_MS }).then((r) => r.data);
 
 export const convertTitles = (titles: string[]) =>
   api.post<{ converted: string[] }>("/convert-titles", { titles }).then((r) => r.data);

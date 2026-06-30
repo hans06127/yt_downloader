@@ -251,6 +251,14 @@ class BackendTests(unittest.TestCase):
         self.assertIn("DRM", result)
         self.assertIn("不支援下載", result)
 
+    def test_download_403_error_is_normalized(self):
+        result = app.normalize_query_error(
+            "ERROR: unable to download video data: HTTP Error 403: Forbidden"
+        )
+
+        self.assertIn("HTTP 403", result)
+        self.assertIn("cookies.txt", result)
+
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
