@@ -64,11 +64,11 @@ export default function MultiDownload({
           onChange={(event) => onTextChange(event.target.value)}
         />
         <div className="action-bar">
-          <ActionButton disabled={loading} onClick={onFetch}>
+          <ActionButton disabled={loading} variant="primary" onClick={onFetch}>
             {loading ? <span className="spinner" /> : null}
             查詢全部資訊
           </ActionButton>
-          <ActionButton onClick={onReset}>重置</ActionButton>
+          <ActionButton variant="ghost" onClick={onReset}>重置</ActionButton>
         </div>
       </section>
 

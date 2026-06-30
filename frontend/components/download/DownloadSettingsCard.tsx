@@ -40,10 +40,10 @@ export default function DownloadSettingsCard({
         onChange={(outputDir) => updateSettings({ outputDir })}
       />
       <div className="action-bar">
-        <ActionButton variant="primary" onClick={onStart}>
+        <ActionButton variant="success" onClick={onStart}>
           {startLabel}
         </ActionButton>
-        {onReset ? <ActionButton onClick={onReset}>重置</ActionButton> : null}
+        {onReset ? <ActionButton variant="ghost" onClick={onReset}>重置</ActionButton> : null}
       </div>
     </section>
   );

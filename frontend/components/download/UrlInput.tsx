@@ -28,7 +28,7 @@ export default function UrlInput({
           if (event.key === "Enter") onSubmit();
         }}
       />
-      <ActionButton className="shrink" disabled={loading} onClick={onSubmit}>
+      <ActionButton className="shrink" disabled={loading} variant="primary" onClick={onSubmit}>
         {loading ? <span className="spinner" /> : null}
         {buttonLabel}
       </ActionButton>

@@ -1,7 +1,7 @@
 import styled, { css } from "styled-components";
 import type { ButtonHTMLAttributes, ReactNode } from "react";
 
-type ButtonVariant = "primary" | "ghost" | "danger" | "warn";
+type ButtonVariant = "primary" | "secondary" | "ghost" | "success" | "danger" | "warn";
 type ButtonSize = "sm" | "md";
 
 const variantStyles = {
@@ -14,6 +14,17 @@ const variantStyles = {
       filter: brightness(1.1);
     }
   `,
+  secondary: css`
+    background: rgb(34 211 238 / 12%);
+    border: 1px solid rgb(34 211 238 / 30%);
+    color: #67e8f9;
+
+    &:hover:not(:disabled) {
+      background: rgb(34 211 238 / 18%);
+      border-color: rgb(34 211 238 / 48%);
+      color: #a5f3fc;
+    }
+  `,
   ghost: css`
     background: #121c2b;
     border: 1px solid var(--border);
@@ -22,6 +33,17 @@ const variantStyles = {
     &:hover:not(:disabled) {
       border-color: var(--accent);
       color: var(--accent);
+    }
+  `,
+  success: css`
+    background: rgb(53 208 127 / 16%);
+    border: 1px solid rgb(53 208 127 / 34%);
+    color: var(--success);
+
+    &:hover:not(:disabled) {
+      background: rgb(53 208 127 / 22%);
+      border-color: rgb(53 208 127 / 52%);
+      color: #89f5b9;
     }
   `,
   danger: css`
@@ -71,7 +93,7 @@ interface ActionButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 export default function ActionButton({
   children,
   size = "md",
-  variant = "ghost",
+  variant = "secondary",
   ...props
 }: ActionButtonProps) {
   return (

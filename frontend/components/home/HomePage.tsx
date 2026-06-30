@@ -53,6 +53,7 @@ import {
   parseUrls,
   selectedItems,
 } from "@/lib/download/items";
+import { normalizeCurrentVideoUrl, normalizeCurrentVideoUrls } from "@/lib/download/urls";
 import {
   useFailedDownloadStore,
   type FailedDownloadRecord,
@@ -165,7 +166,11 @@ export default function HomePage() {
 
   useEffect(() => {
     if (cookie?.exists && cookie.valid === false) {
-      showCookieAlert(cookie.message || "cookies.txt 無效或已過期，請重新匯出並上傳。");
+      const alertTimer = window.setTimeout(() => {
+        showCookieAlert(cookie.message || "cookies.txt 無效或已過期，請重新匯出並上傳。");
+      }, 0);
+
+      return () => window.clearTimeout(alertTimer);
     }
   }, [cookie?.exists, cookie?.message, cookie?.valid]);
 
@@ -371,8 +376,37 @@ export default function HomePage() {
     });
   };
 
+  const confirmCurrentVideoOnly = (count: number) =>
+    new Promise<boolean>((resolve) => {
+      let settled = false;
+      const finish = (value: boolean) => {
+        if (settled) return;
+        settled = true;
+        resolve(value);
+      };
+
+      modal.confirm({
+        title: "偵測到播放清單參數",
+        content:
+          count > 1
+            ? `有 ${count} 個網址包含清單參數。是否只查詢每個網址目前指定的影片？`
+            : "這個網址包含清單參數。是否只查詢目前指定的影片？",
+        okText: "只查詢目前影片",
+        cancelText: "取消",
+        onOk: () => finish(true),
+        onCancel: () => finish(false),
+        afterClose: () => finish(false),
+      });
+    });
+
   const fetchSingleInfo = async () => {
-    const url = singleUrl.trim();
+    const rawUrl = singleUrl.trim();
+    if (!rawUrl) return;
+
+    const normalized = normalizeCurrentVideoUrl(rawUrl);
+    if (normalized.changed && !(await confirmCurrentVideoOnly(1))) return;
+
+    const url = normalized.url;
     if (!url) return;
 
     resetQueryResults("single");
@@ -437,8 +471,13 @@ export default function HomePage() {
   };
 
   const fetchMultiInfo = async () => {
-    const urls = parseUrls(multiText);
-    if (!urls.length) return;
+    const rawUrls = parseUrls(multiText);
+    if (!rawUrls.length) return;
+
+    const normalized = normalizeCurrentVideoUrls(rawUrls);
+    if (normalized.changedCount && !(await confirmCurrentVideoOnly(normalized.changedCount))) return;
+
+    const urls = normalized.urls;
 
     resetQueryResults("multi");
     setMultiLoading(true);
