@@ -1,6 +1,6 @@
 {
     "name":  "yt-downloader",
-    "version":  "0.2.8",
+    "version":  "0.2.9",
     "private":  true,
     "scripts":  {
                     "dev":  "python app.py",

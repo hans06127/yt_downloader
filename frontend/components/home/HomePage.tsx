@@ -75,6 +75,10 @@ const tabLabels: Record<TabKey, string> = {
   import: "匯入檔案",
 };
 
+const LONG_RUNNING_NOTICE_INTERVAL_MS = 30000;
+const LONG_RUNNING_RESTART_HINT =
+  "如果不是大量檔案（約 50-100 筆）或長影片（10 分鐘以上），建議重啟應用程式或後端後再試。";
+
 interface JobConsoleState {
   status?: JobStatus["status"];
   currentIndex?: number;
@@ -157,6 +161,33 @@ export default function HomePage() {
   const maybeShowCookieAlert = (message: string) => {
     if (isCookieIssueMessage(message)) {
       showCookieAlert(message);
+    }
+  };
+
+  const runWithLongRunningNotice = async <T,>(
+    messageKey: string,
+    label: string,
+    action: () => Promise<T>,
+    getProgress?: () => string,
+  ) => {
+    let units = 0;
+    const timer = window.setInterval(() => {
+      units += 1;
+      const elapsedSeconds = Math.round((units * LONG_RUNNING_NOTICE_INTERVAL_MS) / 1000);
+      const progress = getProgress?.();
+      messageApi.open({
+        key: messageKey,
+        type: "loading",
+        duration: 0,
+        content: `${label}處理中，已等待約 ${elapsedSeconds} 秒。${progress ? `${progress} ` : ""}${LONG_RUNNING_RESTART_HINT}`,
+      });
+    }, LONG_RUNNING_NOTICE_INTERVAL_MS);
+
+    try {
+      return await action();
+    } finally {
+      window.clearInterval(timer);
+      messageApi.destroy(messageKey);
     }
   };
 
@@ -414,7 +445,11 @@ export default function HomePage() {
     logInfo("開始查詢單一影片", { url });
 
     try {
-      const info = await fetchInfoApi(url);
+      const info = await runWithLongRunningNotice(
+        "single-fetch-info",
+        "單支影片資訊",
+        () => fetchInfoApi(url),
+      );
       if (!info) {
         setSingleError("查詢失敗：後端沒有回傳影片資訊");
         logError("單一影片查詢失敗", { url, error: "empty response" });
@@ -485,9 +520,14 @@ export default function HomePage() {
     logInfo("開始查詢多個網址", { total: urls.length, urls });
 
     try {
-      for (const url of urls) {
+      for (const [index, url] of urls.entries()) {
         try {
-          const info = await fetchInfoApi(url);
+          const info = await runWithLongRunningNotice(
+            "multi-fetch-info",
+            "批次影片資訊",
+            () => fetchInfoApi(url),
+            () => `目前進度 ${index + 1} / ${urls.length}。`,
+          );
           if (!info) {
             logError("網址查詢失敗", { url, error: "empty response" });
             continue;
@@ -532,7 +572,12 @@ export default function HomePage() {
     logInfo("開始查詢播放清單", { url });
 
     try {
-      await fetchPlaylistStream(url, (msg) => {
+      let loadedCount = 0;
+      let totalCount = 0;
+      await runWithLongRunningNotice(
+        "playlist-fetch-info",
+        "播放清單資訊",
+        () => fetchPlaylistStream(url, (msg) => {
         if ("error" in msg) {
           setPlaylistError(msg.error);
           maybeShowCookieAlert(msg.error);
@@ -541,16 +586,20 @@ export default function HomePage() {
         }
 
         if (msg.type === "header") {
+          totalCount = msg.total;
           setPlaylistMeta({ title: msg.title, uploader: msg.uploader, total: msg.total });
         }
 
         if (msg.type === "meta") {
+          totalCount = msg.total;
           setPlaylistMeta({ title: msg.title, uploader: msg.uploader, total: msg.total });
           if (msg.warning) setPlaylistError(msg.warning);
           logInfo("播放清單資訊取得成功", msg);
         }
 
         if (msg.type === "chunk") {
+          loadedCount = msg.loaded;
+          totalCount = msg.total;
           const nextItems = (msg.items || []).map((item) => normalizeItem({ ...item, _checked: !item.is_private }));
           setPlaylistItems((prev) => markDuplicates([...prev, ...nextItems]));
           setPlaylistLoadProgress({ loaded: msg.loaded, total: msg.total });
@@ -558,6 +607,7 @@ export default function HomePage() {
         }
 
         if (msg.type === "done") {
+          loadedCount = msg.total;
           setPlaylistLoadProgress((prev) => ({ loaded: msg.total, total: prev.total || msg.total }));
           logInfo("播放清單查詢完成", { total: msg.total });
         }
@@ -567,7 +617,9 @@ export default function HomePage() {
           maybeShowCookieAlert(msg.message);
           logError("播放清單查詢失敗", { url, error: msg.message });
         }
-      });
+        }),
+        () => (loadedCount ? `目前已載入 ${loadedCount} / ${totalCount || "?"}。` : ""),
+      );
     } catch (error) {
       const message = errorMessage(error);
       setPlaylistError(message);
@@ -585,7 +637,11 @@ export default function HomePage() {
     logInfo("開始解析匯入檔案", { name: file.name, size: file.size });
 
     try {
-      const result = await parseImportApi(file);
+      const result = await runWithLongRunningNotice(
+        "import-parse-file",
+        "匯入檔案",
+        () => parseImportApi(file),
+      );
       if (result.error) {
         setImportMessage(result.error);
         logError("匯入檔案解析失敗", { name: file.name, error: result.error });
@@ -615,9 +671,14 @@ export default function HomePage() {
     logInfo("開始查詢匯入影片", { total: sourceItems.length });
 
     try {
-      for (const item of sourceItems) {
+      for (const [index, item] of sourceItems.entries()) {
         try {
-          const info = await fetchInfoApi(item.url);
+          const info = await runWithLongRunningNotice(
+            "import-fetch-info",
+            "匯入清單影片資訊",
+            () => fetchInfoApi(item.url),
+            () => `目前進度 ${index + 1} / ${sourceItems.length}。`,
+          );
           if (!info) {
             nextItems.push(item);
             logError("匯入影片查詢失敗", { url: item.url, error: "empty response" });
