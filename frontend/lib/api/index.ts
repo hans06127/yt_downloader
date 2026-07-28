@@ -1,6 +1,20 @@
 import axios from "axios";
 
 const API_PATH = "/api";
+const CLIENT_ID_KEY = "yt-downloader-client-id";
+
+export function resolveClientId() {
+  if (typeof window === "undefined") return null;
+  const existing = window.localStorage.getItem(CLIENT_ID_KEY);
+  if (existing) return existing;
+
+  const generated =
+    typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  window.localStorage.setItem(CLIENT_ID_KEY, generated);
+  return generated;
+}
 
 function normalizeApiBaseUrl(value: string) {
   const normalized = value.trim().replace(/\/+$/, "");
@@ -30,6 +44,12 @@ export function resolveApiUrl(path: string) {
 const api = axios.create({
   baseURL: resolveApiBaseUrl(),
   timeout: 30000,
+});
+
+api.interceptors.request.use((config) => {
+  const clientId = resolveClientId();
+  if (clientId) config.headers.set("X-Client-Id", clientId);
+  return config;
 });
 
 export default api;
