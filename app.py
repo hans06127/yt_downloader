@@ -1513,6 +1513,10 @@ def api_upload_cookie():
     if not cookie_path:
         return jsonify({"error": "Missing or invalid X-Client-Id header"}), 400
     cookie_path.write_text(content, encoding="utf-8")
+    try:
+        cookie_path.chmod(0o600)
+    except OSError:
+        pass
     logger.info("[cookie] Cookie file updated")
     return jsonify({"ok": True})
 
