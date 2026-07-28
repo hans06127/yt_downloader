@@ -30,10 +30,12 @@ import {
   cancelAllJobs as cancelAllJobsApi,
   cancelJob as cancelJobApi,
   convertTitles,
+  downloadJobArchive,
   fetchInfo as fetchInfoApi,
   fetchPlaylistStream,
   getDefaultDir,
   getJobStatus,
+  getRuntimeConfig,
   openFolder as openFolderApi,
   parseImport as parseImportApi,
   startDownload,
@@ -143,9 +145,17 @@ export default function HomePage() {
     refetchOnWindowFocus: true,
     staleTime: 0,
   });
+  const runtimeQuery = useQuery({
+    queryKey: ["runtime-config"],
+    queryFn: getRuntimeConfig,
+    staleTime: Infinity,
+  });
+  const supportsLocalFilesystem =
+    runtimeQuery.data?.supports_local_filesystem ?? true;
   const defaultDirQuery = useQuery({
     queryKey: ["default-dir"],
     queryFn: getDefaultDir,
+    enabled: runtimeQuery.isSuccess && supportsLocalFilesystem,
   });
   const uploadCookieMutation = useMutation({ mutationFn: uploadCookieApi });
   const deleteCookieMutation = useMutation({ mutationFn: deleteCookieApi });
@@ -317,6 +327,22 @@ export default function HomePage() {
               logError(`工作完成但有失敗 [${tabLabels[tab]}]`, status);
             } else if (status.status === "cancelled") {
               console.warn(`[YT Downloader] 工作已取消 [${tabLabels[tab]}]`, status);
+            }
+          }
+
+          if (
+            status.status === "done" &&
+            previous.status !== "done" &&
+            status.completed > 0 &&
+            !supportsLocalFilesystem
+          ) {
+            try {
+              await downloadJobArchive(jobId);
+              messageApi.success("下載完成，瀏覽器已開始下載 ZIP 檔案");
+            } catch (error) {
+              const message = errorMessage(error);
+              logError(`取得網站版下載檔案失敗 [${tabLabels[tab]}]`, message);
+              messageApi.error(message);
             }
           }
 
@@ -956,6 +982,11 @@ export default function HomePage() {
   };
 
   const openFolder = async (folder: string) => {
+    if (!supportsLocalFilesystem) {
+      messageApi.info("網站版會由瀏覽器提供下載檔案，無法開啟伺服器資料夾");
+      return;
+    }
+
     try {
       await openFolderApi(folder);
     } catch (error) {
