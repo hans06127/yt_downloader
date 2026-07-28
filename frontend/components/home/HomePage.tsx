@@ -34,6 +34,7 @@ import {
   fetchPlaylistStream,
   getDefaultDir,
   getJobStatus,
+  getRuntimeConfig,
   openFolder as openFolderApi,
   parseImport as parseImportApi,
   startDownload,
@@ -143,9 +144,17 @@ export default function HomePage() {
     refetchOnWindowFocus: true,
     staleTime: 0,
   });
+  const runtimeQuery = useQuery({
+    queryKey: ["runtime-config"],
+    queryFn: getRuntimeConfig,
+    staleTime: Infinity,
+  });
+  const supportsLocalFilesystem =
+    runtimeQuery.data?.supports_local_filesystem ?? true;
   const defaultDirQuery = useQuery({
     queryKey: ["default-dir"],
     queryFn: getDefaultDir,
+    enabled: runtimeQuery.isSuccess && supportsLocalFilesystem,
   });
   const uploadCookieMutation = useMutation({ mutationFn: uploadCookieApi });
   const deleteCookieMutation = useMutation({ mutationFn: deleteCookieApi });
@@ -956,6 +965,11 @@ export default function HomePage() {
   };
 
   const openFolder = async (folder: string) => {
+    if (!supportsLocalFilesystem) {
+      messageApi.info("網站版會由瀏覽器提供下載檔案，無法開啟伺服器資料夾");
+      return;
+    }
+
     try {
       await openFolderApi(folder);
     } catch (error) {
