@@ -27,6 +27,20 @@ class WebRuntimeStoreTests(unittest.TestCase):
         self.assertEqual(loaded["job-1"]["status"], "error")
         self.assertIn("重新啟動", loaded["job-1"]["error"])
 
+    def test_queued_jobs_remain_available_for_resume(self):
+        self.store.save_job(
+            "job-queued",
+            {
+                "status": "queued",
+                "_request": {"items": [{"url": "https://example.com/video"}]},
+            },
+        )
+
+        loaded = self.store.load_jobs()
+
+        self.assertEqual(loaded["job-queued"]["status"], "queued")
+        self.assertIn("_request", loaded["job-queued"])
+
     def test_cookie_files_are_isolated_by_client(self):
         first = self.store.cookie_file("client-1111111111")
         second = self.store.cookie_file("client-2222222222")
