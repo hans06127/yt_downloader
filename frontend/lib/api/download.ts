@@ -1,5 +1,5 @@
 import type { FetchInfoResult, JobStatus, StartDownloadPayload, StreamMessage } from "@/lib/types";
-import api from "./index";
+import api, { resolveApiUrl } from "./index";
 
 const FETCH_INFO_TIMEOUT_MS = 120000;
 
@@ -30,20 +30,35 @@ export const cancelAllJobs = () =>
 export const openFolder = (folder: string) =>
   api.post("/open-folder", { folder }).then((r) => r.data);
 
+export interface RuntimeConfig {
+  runtime: "desktop" | "web";
+  supports_local_filesystem: boolean;
+}
+
+export const getRuntimeConfig = () =>
+  api.get<RuntimeConfig>("/runtime-config").then((r) => r.data);
+
 export const getDefaultDir = () =>
-  api.get<{ path: string }>("/default-dir").then((r) => r.data);
+  api.get<{ path: string; available?: boolean }>("/default-dir").then((r) => r.data);
 
 export const fetchPlaylistStream = async (
   url: string,
   onChunk: (msg: StreamMessage) => void,
 ) => {
-  const response = await fetch("/api/fetch-playlist-stream", {
+  const response = await fetch(resolveApiUrl("/fetch-playlist-stream"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ url }),
   });
 
-  const reader = response.body!.getReader();
+  if (!response.ok) {
+    throw new Error(`播放清單載入失敗（HTTP ${response.status}）`);
+  }
+  if (!response.body) {
+    throw new Error("播放清單載入失敗：後端未回傳串流");
+  }
+
+  const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
 
