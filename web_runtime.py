@@ -57,7 +57,7 @@ class WebRuntimeStore:
                 job = json.loads(payload)
             except (TypeError, json.JSONDecodeError):
                 continue
-            if job.get("status") in {"queued", "running", "cancelling"}:
+            if job.get("status") in {"running", "cancelling"}:
                 job["status"] = "error"
                 job["error"] = "後端曾重新啟動，原下載工作已中止。"
                 job["finished_at"] = datetime.datetime.now().isoformat(timespec="seconds")
