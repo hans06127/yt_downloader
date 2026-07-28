@@ -49,19 +49,22 @@ class WebRuntimeStore:
 
     def load_jobs(self):
         jobs = {}
+        interrupted = []
         with self._connect() as connection:
             rows = connection.execute("SELECT id, payload FROM jobs").fetchall()
-            for job_id, payload in rows:
-                try:
-                    job = json.loads(payload)
-                except (TypeError, json.JSONDecodeError):
-                    continue
-                if job.get("status") in {"queued", "running", "cancelling"}:
-                    job["status"] = "error"
-                    job["error"] = "後端曾重新啟動，原下載工作已中止。"
-                    job["finished_at"] = datetime.datetime.now().isoformat(timespec="seconds")
-                    self.save_job(job_id, job)
-                jobs[job_id] = job
+        for job_id, payload in rows:
+            try:
+                job = json.loads(payload)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if job.get("status") in {"queued", "running", "cancelling"}:
+                job["status"] = "error"
+                job["error"] = "後端曾重新啟動，原下載工作已中止。"
+                job["finished_at"] = datetime.datetime.now().isoformat(timespec="seconds")
+                interrupted.append((job_id, job))
+            jobs[job_id] = job
+        for job_id, job in interrupted:
+            self.save_job(job_id, job)
         return jobs
 
     def save_job(self, job_id, job):
@@ -125,4 +128,17 @@ class WebRuntimeStore:
                 connection.executemany("DELETE FROM jobs WHERE id = ?", [(job_id,) for job_id in expired_ids])
         for job_id in expired_ids:
             shutil.rmtree(self.downloads_root / job_id, ignore_errors=True)
+
+        cookie_cutoff = cutoff.timestamp()
+        for client_dir in self.cookies_root.iterdir():
+            if not client_dir.is_dir():
+                continue
+            cookie_file = client_dir / "cookies.txt"
+            try:
+                last_modified = cookie_file.stat().st_mtime
+            except OSError:
+                shutil.rmtree(client_dir, ignore_errors=True)
+                continue
+            if last_modified < cookie_cutoff:
+                shutil.rmtree(client_dir, ignore_errors=True)
         return expired_ids
