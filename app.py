@@ -15,12 +15,13 @@ import shutil
 import subprocess
 import tempfile
 import math
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, send_file
 from flask_cors import CORS
 import yt_dlp
 import openpyxl
 import opencc
 from pathlib import Path
+from web_runtime import WebRuntimeStore, normalize_client_id
 
 # OpenCC converter: Simplified → Traditional
 _s2t = opencc.OpenCC('s2t')
@@ -84,9 +85,42 @@ CORS(
 download_jobs = {}
 download_runtimes = {}
 download_jobs_lock = threading.RLock()
+WEB_STORE = WebRuntimeStore() if APP_RUNTIME == "web" else None
+if WEB_STORE:
+    WEB_STORE.cleanup_expired()
+    download_jobs.update(WEB_STORE.load_jobs())
 
 # Cookie file path
 COOKIE_FILE = APP_DIR / "cookies.txt"
+
+
+def current_client_id():
+    if APP_RUNTIME != "web":
+        return "desktop"
+    return normalize_client_id(request.headers.get("X-Client-Id"))
+
+
+def active_cookie_file(client_id=None):
+    if APP_RUNTIME != "web":
+        return COOKIE_FILE
+    resolved_client_id = client_id or current_client_id()
+    return WEB_STORE.cookie_file(resolved_client_id) if resolved_client_id else None
+
+
+def job_is_accessible(job):
+    return APP_RUNTIME != "web" or (
+        current_client_id() is not None
+        and job.get("client_id") == current_client_id()
+    )
+
+
+def persist_job(job_id):
+    if not WEB_STORE:
+        return
+    with download_jobs_lock:
+        job = download_jobs.get(job_id)
+        if job:
+            WEB_STORE.save_job(job_id, job)
 
 class YtdlpErrorCollector:
     """Collect yt-dlp errors that are swallowed when ignoreerrors=True."""
@@ -107,15 +141,18 @@ class YtdlpErrorCollector:
     def message(self):
         return self.errors[-1] if self.errors else ""
 
-def get_cookie_opt():
-    """Return cookiefile path if cookies.txt exists"""
-    if COOKIE_FILE.exists():
-        return str(COOKIE_FILE)
+def get_cookie_opt(cookie_file=None):
+    """Return the active user's cookie file when it exists."""
+    cookie_path = Path(cookie_file) if cookie_file else active_cookie_file()
+    if cookie_path and cookie_path.exists():
+        return str(cookie_path)
     return None
 
-def inspect_cookie_file():
-    """Return local validity details for cookies.txt without contacting YouTube."""
-    if not COOKIE_FILE.exists():
+
+def inspect_cookie_file(cookie_file=None):
+    """Return local validity details for the active cookie file."""
+    cookie_path = Path(cookie_file) if cookie_file else active_cookie_file()
+    if not cookie_path or not cookie_path.exists():
         return {
             "exists": False,
             "mtime": None,
@@ -123,10 +160,10 @@ def inspect_cookie_file():
             "message": "尚未上傳 cookies.txt",
         }
 
-    mtime = datetime.datetime.fromtimestamp(COOKIE_FILE.stat().st_mtime).strftime("%Y/%m/%d %H:%M")
+    mtime = datetime.datetime.fromtimestamp(cookie_path.stat().st_mtime).strftime("%Y/%m/%d %H:%M")
     jar = http.cookiejar.MozillaCookieJar()
     try:
-        jar.load(str(COOKIE_FILE), ignore_discard=True, ignore_expires=True)
+        jar.load(str(cookie_path), ignore_discard=True, ignore_expires=True)
     except Exception as exc:
         logger.warning("[cookie] Failed to parse cookie file: %s", exc)
         return {
@@ -180,6 +217,7 @@ def inspect_cookie_file():
         "valid": True,
         "message": "Cookie 可讀取且尚未過期。",
     }
+
 
 def get_system_downloads_dir():
     """Get the system default Downloads directory"""
@@ -236,7 +274,7 @@ def get_postprocessors(media_type, extension):
             return [{"key": "FFmpegVideoConvertor", "preferedformat": extension}]
         return []
 
-def build_ydl_opts_base(extra=None):
+def build_ydl_opts_base(extra=None, cookie_file=None):
     """Build common yt-dlp options with cookie and remote-components"""
     opts = {
         "quiet": True,
@@ -248,7 +286,7 @@ def build_ydl_opts_base(extra=None):
         "extractor_retries": 3,
         "file_access_retries": 3,
     }
-    cookie = get_cookie_opt()
+    cookie = get_cookie_opt(cookie_file)
     if cookie:
         opts["cookiefile"] = cookie
     if extra:
@@ -465,7 +503,7 @@ def _parse_playlist_contents(contents):
             )
     return entries, continuation
 
-def fetch_youtube_playlist_continuation_entries(url, limit=9999):
+def fetch_youtube_playlist_continuation_entries(url, limit=9999, cookie_file=None):
     """Best-effort YouTube playlist page walker for entries beyond yt-dlp's first 100."""
     parsed = urllib.parse.urlparse(url)
     playlist_id = urllib.parse.parse_qs(parsed.query).get("list", [""])[0]
@@ -474,9 +512,10 @@ def fetch_youtube_playlist_continuation_entries(url, limit=9999):
 
     jar = http.cookiejar.MozillaCookieJar()
     handlers = []
-    if COOKIE_FILE.exists():
+    cookie_path = Path(cookie_file) if cookie_file else active_cookie_file()
+    if cookie_path and cookie_path.exists():
         try:
-            jar.load(str(COOKIE_FILE), ignore_discard=True, ignore_expires=True)
+            jar.load(str(cookie_path), ignore_discard=True, ignore_expires=True)
             handlers.append(urllib.request.HTTPCookieProcessor(jar))
         except Exception:
             pass
@@ -574,10 +613,10 @@ def fetch_youtube_playlist_continuation_entries(url, limit=9999):
             })
     return unique_entries[:limit], title
 
-def complete_playlist_entries(url, ydl_entries):
+def complete_playlist_entries(url, ydl_entries, cookie_file=None):
     """Use YouTube continuation pages when yt-dlp only returns the first page."""
     try:
-        continuation_entries, continuation_title = fetch_youtube_playlist_continuation_entries(url)
+        continuation_entries, continuation_title = fetch_youtube_playlist_continuation_entries(url, cookie_file=cookie_file)
     except Exception as ex:
         return ydl_entries, "", f"continuation failed: {ex}"
 
@@ -837,6 +876,7 @@ def download_item_process(event_queue, item, media_type, extension, output_dir):
     url = item["url"]
     custom_title = item.get("custom_title", "").strip() or None
     segments = item.get("segments") or []
+    cookie_file = item.get("_cookie_file")
     last_progress = {"percent": -1, "time": 0.0}
 
     def progress_hook(data):
@@ -865,7 +905,7 @@ def download_item_process(event_queue, item, media_type, extension, output_dir):
             "outtmpl": outtmpl,
             "progress_hooks": [progress_hook],
             "postprocessors": get_postprocessors(media_type, extension),
-        })
+        }, cookie_file=cookie_file)
         if media_type == "video" and extension in ["mkv", "avi", "mov"]:
             opts["merge_output_format"] = extension
         return opts
@@ -908,7 +948,7 @@ def download_item_process(event_queue, item, media_type, extension, output_dir):
         "outtmpl": outtmpl,
         "progress_hooks": [progress_hook],
         "postprocessors": get_postprocessors(media_type, extension),
-    })
+    }, cookie_file=cookie_file)
     if media_type == "video" and extension in ["mkv", "avi", "mov"]:
         ydl_opts["merge_output_format"] = extension
 
@@ -964,10 +1004,15 @@ def download_worker(job_id, items, media_type, extension, output_dir, title_hint
             "started_at": datetime.datetime.now().isoformat(timespec="seconds"),
         })
 
-    output_dir = resolve_output_dir(output_dir, title_hint)
+    output_dir = (
+        str(WEB_STORE.output_dir(job_id))
+        if WEB_STORE
+        else resolve_output_dir(output_dir, title_hint)
+    )
 
     with download_jobs_lock:
         job["output_dir"] = output_dir
+    persist_job(job_id)
 
     logger.info(
         "[job:%s] Started: %s item(s), type=%s, extension=%s, output=%s",
@@ -1079,6 +1124,7 @@ def download_worker(job_id, items, media_type, extension, output_dir, title_hint
                         "segments": item.get("segments") or [],
                         "status": "success",
                     })
+                persist_job(job_id)
                 logger.info("[job:%s] Completed %s/%s: %s", job_id, index + 1, len(items), title)
             else:
                 message = (result or {}).get("message") or f"Download process exited with code {process.exitcode}"
@@ -1092,6 +1138,7 @@ def download_worker(job_id, items, media_type, extension, output_dir, title_hint
                         "status": "error",
                         "message": message,
                     })
+                persist_job(job_id)
                 logger.error("[job:%s] Failed %s/%s: %s - %s", job_id, index + 1, len(items), title, message)
     except BaseException:
         logger.exception("[job:%s] Worker crashed", job_id)
@@ -1106,7 +1153,10 @@ def download_worker(job_id, items, media_type, extension, output_dir, title_hint
             if job["status"] == "done":
                 job["current_percent"] = 100
             job["finished_at"] = datetime.datetime.now().isoformat(timespec="seconds")
+            if WEB_STORE:
+                job["artifacts"] = [path.name for path in WEB_STORE.artifact_files(job_id)]
             download_runtimes.pop(job_id, None)
+        persist_job(job_id)
 
         if job["status"] == "cancelled":
             logger.warning("[job:%s] Job cancelled", job_id)
@@ -1273,6 +1323,11 @@ def api_parse_import():
 
 @app.route("/api/start-download", methods=["POST"])
 def api_start_download():
+    client_id = current_client_id()
+    if APP_RUNTIME == "web" and not client_id:
+        return jsonify({"error": "Missing or invalid X-Client-Id header"}), 400
+    if WEB_STORE:
+        WEB_STORE.cleanup_expired()
     data = request.json
     # Accept either old format {urls:[]} or new format {items:[{url, custom_title}]}
     raw_items = data.get("items", [])
@@ -1293,6 +1348,12 @@ def api_start_download():
         return jsonify({"error": str(error)}), 400
 
     job_id = str(uuid.uuid4())
+    cookie_path = active_cookie_file(client_id)
+    if cookie_path and cookie_path.exists():
+        for item in raw_items:
+            item["_cookie_file"] = str(cookie_path)
+    if WEB_STORE:
+        output_dir = str(WEB_STORE.output_dir(job_id))
     with download_jobs_lock:
         download_jobs[job_id] = {
             "status": "queued",
@@ -1307,8 +1368,11 @@ def api_start_download():
             "log": [],
             "cancelled": False,
             "created_at": datetime.datetime.now().isoformat(timespec="seconds"),
+            "client_id": client_id,
+            "artifacts": [],
         }
         download_runtimes[job_id] = {"process": None, "thread": None}
+    persist_job(job_id)
 
     t = threading.Thread(
         target=download_worker,
@@ -1381,22 +1445,25 @@ def format_segment_time(seconds):
 def api_job_status(job_id):
     with download_jobs_lock:
         job = download_jobs.get(job_id)
-        if not job:
+        if not job or not job_is_accessible(job):
             return jsonify({"error": "Job not found"}), 404
         snapshot = dict(job)
         snapshot["log"] = [dict(entry) for entry in job.get("log", [])]
+        if APP_RUNTIME == "web":
+            snapshot["output_dir"] = ""
     return jsonify(snapshot)
 
 @app.route("/api/cancel-job/<job_id>", methods=["POST"])
 def api_cancel_job(job_id):
     with download_jobs_lock:
         job = download_jobs.get(job_id)
-        if not job:
+        if not job or not job_is_accessible(job):
             return jsonify({"error": "Job not found"}), 404
         if job.get("status") in ("done", "cancelled", "error"):
             return jsonify({"ok": True, "status": job.get("status")})
         job["cancelled"] = True
         job["status"] = "cancelling"
+    persist_job(job_id)
     terminated = terminate_download_process(job_id)
     logger.warning("[job:%s] Cancel requested, process_terminated=%s", job_id, terminated)
     return jsonify({"ok": True, "status": "cancelling", "terminated": terminated})
@@ -1409,10 +1476,13 @@ def api_cancel_all_jobs():
             job_id
             for job_id, job in download_jobs.items()
             if job.get("status") not in ("done", "cancelled", "error")
+            and job_is_accessible(job)
         ]
         for job_id in active_job_ids:
             download_jobs[job_id]["cancelled"] = True
             download_jobs[job_id]["status"] = "cancelling"
+    for job_id in active_job_ids:
+        persist_job(job_id)
 
     terminated = sum(1 for job_id in active_job_ids if terminate_download_process(job_id))
     logger.warning("[jobs] Cancel all requested: jobs=%s terminated=%s", len(active_job_ids), terminated)
@@ -1420,6 +1490,8 @@ def api_cancel_all_jobs():
 
 @app.route("/api/cookie-status")
 def api_cookie_status():
+    if APP_RUNTIME == "web" and not current_client_id():
+        return jsonify({"error": "Missing or invalid X-Client-Id header"}), 400
     return jsonify(inspect_cookie_file())
 
 @app.route("/api/upload-cookie", methods=["POST"])
@@ -1432,16 +1504,42 @@ def api_upload_cookie():
     content = f.read().decode("utf-8", errors="ignore")
     if "youtube.com" not in content and "HTTP Cookie" not in content and "# Netscape" not in content:
         return jsonify({"error": "檔案格式不正確，請確認是 YouTube cookies.txt"}), 400
-    COOKIE_FILE.write_text(content, encoding="utf-8")
+    cookie_path = active_cookie_file()
+    if not cookie_path:
+        return jsonify({"error": "Missing or invalid X-Client-Id header"}), 400
+    cookie_path.write_text(content, encoding="utf-8")
     logger.info("[cookie] Cookie file updated")
     return jsonify({"ok": True})
 
 @app.route("/api/delete-cookie", methods=["POST"])
 def api_delete_cookie():
-    if COOKIE_FILE.exists():
-        COOKIE_FILE.unlink()
+    cookie_path = active_cookie_file()
+    if not cookie_path:
+        return jsonify({"error": "Missing or invalid X-Client-Id header"}), 400
+    if cookie_path.exists():
+        cookie_path.unlink()
     logger.info("[cookie] Cookie file deleted")
     return jsonify({"ok": True})
+
+@app.route("/api/job-download/<job_id>")
+def api_job_download(job_id):
+    if not WEB_STORE:
+        return jsonify({"error": "Browser download is available only in web runtime"}), 409
+    with download_jobs_lock:
+        job = download_jobs.get(job_id)
+        if not job or not job_is_accessible(job):
+            return jsonify({"error": "Job not found"}), 404
+        if job.get("status") != "done":
+            return jsonify({"error": "Job is not complete"}), 409
+    archive_path = WEB_STORE.build_archive(job_id)
+    if not archive_path:
+        return jsonify({"error": "No downloaded files found"}), 404
+    return send_file(
+        archive_path,
+        as_attachment=True,
+        download_name=f"yt-downloader-{job_id[:8]}.zip",
+    )
+
 
 @app.route("/api/open-folder", methods=["POST"])
 def api_open_folder():
