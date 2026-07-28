@@ -60,9 +60,25 @@ def read_app_version():
 
 
 APP_VERSION = read_app_version()
+APP_RUNTIME = os.environ.get("YT_DOWNLOADER_RUNTIME", "desktop").strip().lower()
+if APP_RUNTIME not in {"desktop", "web"}:
+    APP_RUNTIME = "desktop"
+SUPPORTS_LOCAL_FILESYSTEM = APP_RUNTIME == "desktop"
 
 app = Flask(__name__, static_folder=None)
-CORS(app)
+configured_cors_origins = [
+    origin.strip()
+    for origin in os.environ.get("YT_DOWNLOADER_CORS_ORIGINS", "").split(",")
+    if origin.strip()
+]
+CORS(
+    app,
+    resources={
+        r"/api/*": {
+            "origins": configured_cors_origins or "*",
+        }
+    },
+)
 
 # Store download jobs
 download_jobs = {}
@@ -1104,9 +1120,19 @@ def download_worker(job_id, items, media_type, extension, output_dir, title_hint
         else:
             logger.info("[job:%s] Job completed successfully", job_id)
 
+@app.route("/api/runtime-config")
+def api_runtime_config():
+    return jsonify({
+        "runtime": APP_RUNTIME,
+        "supports_local_filesystem": SUPPORTS_LOCAL_FILESYSTEM,
+    })
+
+
 @app.route("/api/default-dir")
 def api_default_dir():
-    return jsonify({"path": str(get_system_downloads_dir())})
+    if not SUPPORTS_LOCAL_FILESYSTEM:
+        return jsonify({"path": "", "available": False})
+    return jsonify({"path": str(get_system_downloads_dir()), "available": True})
 
 
 @app.route("/api/version")
@@ -1420,6 +1446,12 @@ def api_delete_cookie():
 @app.route("/api/open-folder", methods=["POST"])
 def api_open_folder():
     """Open output folder in file explorer"""
+    if not SUPPORTS_LOCAL_FILESYSTEM:
+        return jsonify({
+            "error": "網站版無法開啟伺服器的本機資料夾",
+            "available": False,
+        }), 409
+
     data = request.json
     folder = data.get("folder", "")
     if folder and os.path.exists(folder):
