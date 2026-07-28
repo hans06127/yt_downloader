@@ -1516,7 +1516,10 @@ def api_upload_cookie():
     f = request.files["file"]
     if not f.filename.endswith(".txt"):
         return jsonify({"error": "請上傳 .txt 檔案"}), 400
-    content = f.read().decode("utf-8", errors="ignore")
+    content_bytes = f.read(5 * 1024 * 1024 + 1)
+    if len(content_bytes) > 5 * 1024 * 1024:
+        return jsonify({"error": "cookies.txt 不可超過 5 MB"}), 413
+    content = content_bytes.decode("utf-8", errors="ignore")
     if "youtube.com" not in content and "HTTP Cookie" not in content and "# Netscape" not in content:
         return jsonify({"error": "檔案格式不正確，請確認是 YouTube cookies.txt"}), 400
     cookie_path = active_cookie_file()
@@ -1653,8 +1656,27 @@ def resume_persisted_jobs():
         logger.info("[job:%s] Resumed persisted queued job", job_id)
 
 
+def web_cleanup_loop():
+    interval = max(
+        300,
+        int(os.environ.get("YT_DOWNLOADER_CLEANUP_INTERVAL_SECONDS", "3600")),
+    )
+    while True:
+        time.sleep(interval)
+        try:
+            removed = WEB_STORE.cleanup_expired()
+            if removed:
+                with download_jobs_lock:
+                    for job_id in removed:
+                        download_jobs.pop(job_id, None)
+                logger.info("[cleanup] Removed %s expired web job(s)", len(removed))
+        except Exception:
+            logger.exception("[cleanup] Web data cleanup failed")
+
+
 if WEB_STORE:
     resume_persisted_jobs()
+    threading.Thread(target=web_cleanup_loop, daemon=True).start()
 
 
 if __name__ == "__main__":
