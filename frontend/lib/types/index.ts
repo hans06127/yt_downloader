@@ -57,6 +57,7 @@ export interface JobStatus {
   current_url: string;
   current_percent: number;
   output_dir: string;
+  artifacts?: string[];
   log: Array<{
     url: string;
     title: string;
