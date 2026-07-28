@@ -14,6 +14,8 @@ env/
 # App generated files
 cookies.txt
 downloads/
+.web-data/
+*.sqlite3
 .logs/
 frontend/public/mockServiceWorker.js
 
