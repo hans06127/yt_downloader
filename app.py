@@ -1155,6 +1155,7 @@ def download_worker(job_id, items, media_type, extension, output_dir, title_hint
             job["finished_at"] = datetime.datetime.now().isoformat(timespec="seconds")
             if WEB_STORE:
                 job["artifacts"] = [path.name for path in WEB_STORE.artifact_files(job_id)]
+            job.pop("_request", None)
             download_runtimes.pop(job_id, None)
         persist_job(job_id)
 
@@ -1375,6 +1376,13 @@ def api_start_download():
             "created_at": datetime.datetime.now().isoformat(timespec="seconds"),
             "client_id": client_id,
             "artifacts": [],
+            "_request": {
+                "items": raw_items,
+                "media_type": media_type,
+                "extension": extension,
+                "output_dir": output_dir,
+                "title_hint": title_hint,
+            },
         }
         download_runtimes[job_id] = {"process": None, "thread": None}
     persist_job(job_id)
@@ -1453,6 +1461,8 @@ def api_job_status(job_id):
         if not job or not job_is_accessible(job):
             return jsonify({"error": "Job not found"}), 404
         snapshot = dict(job)
+        snapshot.pop("_request", None)
+        snapshot.pop("client_id", None)
         snapshot["log"] = [dict(entry) for entry in job.get("log", [])]
         if APP_RUNTIME == "web":
             snapshot["output_dir"] = ""
@@ -1609,6 +1619,42 @@ def serve_frontend(path):
             "hint": "Run frontend static export before starting the packaged application.",
         }), 503
     return send_from_directory(target.parent, target.name)
+
+
+def resume_persisted_jobs():
+    if not WEB_STORE:
+        return
+    with download_jobs_lock:
+        queued_jobs = [
+            (job_id, dict(job.get("_request") or {}))
+            for job_id, job in download_jobs.items()
+            if job.get("status") == "queued" and job.get("_request")
+        ]
+    for job_id, payload in queued_jobs:
+        with download_jobs_lock:
+            if job_id in download_runtimes:
+                continue
+            download_runtimes[job_id] = {"process": None, "thread": None}
+        worker = threading.Thread(
+            target=download_worker,
+            args=(
+                job_id,
+                payload["items"],
+                payload["media_type"],
+                payload["extension"],
+                payload.get("output_dir", ""),
+                payload.get("title_hint", "downloads"),
+            ),
+            daemon=True,
+        )
+        with download_jobs_lock:
+            download_runtimes[job_id]["thread"] = worker
+        worker.start()
+        logger.info("[job:%s] Resumed persisted queued job", job_id)
+
+
+if WEB_STORE:
+    resume_persisted_jobs()
 
 
 if __name__ == "__main__":
