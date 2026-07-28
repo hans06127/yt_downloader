@@ -1204,6 +1204,7 @@ def api_fetch_playlist_stream():
     url = data.get("url", "").strip()
     if not url:
         return jsonify({"error": "No URL"}), 400
+    playlist_cookie_file = get_cookie_opt()
 
     def generate():
         logger.info("[playlist] Query started: %s", url)
@@ -1217,7 +1218,7 @@ def api_fetch_playlist_stream():
             "ignoreerrors": True,
             "quiet": True,
             "playlist_items": "1-9999",
-        })
+        }, cookie_file=playlist_cookie_file)
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -1229,7 +1230,11 @@ def api_fetch_playlist_stream():
                 return
 
             entries = [e for e in (info.get("entries") or []) if e]
-            entries, continuation_title, continuation_warning = complete_playlist_entries(url, entries)
+            entries, continuation_title, continuation_warning = complete_playlist_entries(
+                url,
+                entries,
+                cookie_file=playlist_cookie_file,
+            )
             total = len(entries)
             logger.info("[playlist] Query succeeded: %s item(s), %s", total, url)
 
