@@ -1,5 +1,5 @@
 import type { FetchInfoResult, JobStatus, StartDownloadPayload, StreamMessage } from "@/lib/types";
-import api, { resolveApiUrl } from "./index";
+import api, { resolveApiUrl, resolveClientId } from "./index";
 
 const FETCH_INFO_TIMEOUT_MS = 120000;
 
@@ -41,13 +41,31 @@ export const getRuntimeConfig = () =>
 export const getDefaultDir = () =>
   api.get<{ path: string; available?: boolean }>("/default-dir").then((r) => r.data);
 
+export const downloadJobArchive = async (jobId: string) => {
+  const response = await api.get<Blob>(`/job-download/${jobId}`, {
+    responseType: "blob",
+    timeout: 0,
+  });
+  const objectUrl = URL.createObjectURL(response.data);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = `yt-downloader-${jobId.slice(0, 8)}.zip`;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(objectUrl);
+};
+
 export const fetchPlaylistStream = async (
   url: string,
   onChunk: (msg: StreamMessage) => void,
 ) => {
   const response = await fetch(resolveApiUrl("/fetch-playlist-stream"), {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(resolveClientId() ? { "X-Client-Id": resolveClientId()! } : {}),
+    },
     body: JSON.stringify({ url }),
   });
 
